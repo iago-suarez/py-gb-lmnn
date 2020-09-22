@@ -8,20 +8,7 @@ from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import Pipeline
 
-
-def buildmtreemex(x, mi):
-    """
-    Builds a tree.
-    :param x:  input vectors (columns are vectors)
-    :param mi: maximum number of points in leaf
-    :return: (xoutput, index, treeinfo)
-        - xoutput : input vectors reshuffled (sorted according to tree assignment)
-        - index :	index of xouptput (ie xoutput=xinput(x) )
-        - treeinfo : all the necessary information for the tree
-    """
-    tree = None
-    # TODO
-    return tree
+from mtrees import buildmtreemex
 
 
 def usemtreemexomp(xtest, xtrain, tree, k):
@@ -69,10 +56,11 @@ def LSKnn2(Ni, KK, MM):
     return yy
 
 
-def pca(X):
+def pca(X, whiten=False):
     """
     finds principal components of
     :param X:  dxn matrix (each column is a dx1 input vector)
+    :param whiten: Whether to divide by the eigenvalues
     :return: (evects, evals)
         - evects  columns are principal components (leading from left->right)
         - evals   corresponding eigenvalues
@@ -84,6 +72,8 @@ def pca(X):
     ii = np.argsort(-cdd)
     evects = cvv[:, ii]
     evals = cdd[ii]
+    if whiten:
+        evects /= evals
     return evects, evals
 
 
@@ -212,12 +202,13 @@ _, _, _, xTe, xTr, xVa, yTr, yTe, yVa = loadmat('data/segment.mat').values()
 # print('1-NN Error after PCA in 3d is : {}%'.format(100 * err[1]))
 
 print("--> Training pca...")
-L0 = pca(xTr)[0].T
+L0 = pca(xTr, whiten=True)[0].T
 
 print("--> Training pca-lda...")
 pca_lda = Pipeline([
-    ('pca', PCA(n_components=6)),
-    ('lda', LinearDiscriminantAnalysis(n_components=3))])
+    ('pca', PCA(n_components=5, whiten=True)),
+    ('lda', LinearDiscriminantAnalysis(n_components=3))
+])
 
 pca_lda.fit(xTr.T, yTr.flatten())
 lda_xtr, lda_xte = pca_lda.transform(xTr.T), pca_lda.transform(xTe.T)
@@ -271,6 +262,6 @@ for l in np.unique(yTr):
 plt.legend()
 
 ax4 = fig.add_subplot(2, 2, 4, projection='3d')
-ax4.set_title("LMNN")
+ax4.set_title("GB-LMNN")
 
 plt.show()
