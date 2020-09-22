@@ -1,8 +1,12 @@
 # Iago Suarez implementation of Non-linear Metric Learning
 import matplotlib.pyplot as plt
 import numpy as np
-from mpl_toolkits.mplot3d import Axes3D
+from metric_learn import LMNN
 from scipy.io import loadmat
+from sklearn.decomposition import PCA
+from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
+from sklearn.neighbors import KNeighborsClassifier
+from sklearn.pipeline import Pipeline
 
 
 def buildmtreemex(x, mi):
@@ -183,28 +187,90 @@ def knnclassifytreeomp(L, xTr, lTr, xTe, lTe, KK, **kwargs):
     return Eval, Details, kwargs['tree']
 
 
+def eval_knn(X_tr, y_tr, L, X_te, y_te, k=3):
+    assert len(X_tr) == len(y_tr) and len(X_te) == len(y_te)
+    assert L.shape[0] == X_tr.shape[1] and L.shape[0] == X_te.shape[1]
+    kNN = KNeighborsClassifier(n_neighbors=k).fit(X_tr @ L, y_tr)
+    return np.mean(kNN.predict(X_te @ L) != y_te)
+
+
 # #####################################################################################3
 
+print("--> ************************************************************************************")
+print("--> *************************** Metric Learning Demo ***********************************")
+print("--> ************************************************************************************")
+
 # Load variables
+print("--> Loading data")
 _, _, _, xTe, xTr, xVa, yTr, yTe, yVa = loadmat('data/segment.mat').values()
 
 # err, _, _ = knnclassifytreeomp([], xTr, yTr, xTe, yTe, 1)
 #
-# print('1-NN Error for raw (high dimensional) input is : {}%'.format(100 * err[1]))
-
-print('\n')
-L0 = pca(xTr)[0].T
 
 # err, _, _ = knnclassifytreeomp(L0[0:3], xTr, yTr, xTe, yTe, 1)
 # print('\n')
 # print('1-NN Error after PCA in 3d is : {}%'.format(100 * err[1]))
 
-# plt.subplot(3, 2, 1)
+print("--> Training pca...")
+L0 = pca(xTr)[0].T
 
-ax = Axes3D(plt.figure(1, figsize=(8, 6)), elev=-150, azim=110)
+print("--> Training pca-lda...")
+pca_lda = Pipeline([
+    ('pca', PCA(n_components=6)),
+    ('lda', LinearDiscriminantAnalysis(n_components=3))])
+
+pca_lda.fit(xTr.T, yTr.flatten())
+lda_xtr, lda_xte = pca_lda.transform(xTr.T), pca_lda.transform(xTe.T)
+
+print("--> Training lmnn...")
+lmnn = LMNN(init='pca', k=7, learn_rate=1e-6, verbose=False, n_components=3, max_iter=1000)
+lmnn.fit(xTr.T, yTr.flatten())
+
+# ################################ k-NN evaluation ###################################
+print("\n--> Evaluation:")
+k = 1
+te_err = eval_knn(xTr.T, yTr.flatten(), np.eye(len(xTr)), xTe.T, yTe.flatten(), k)
+print('--> 1-NN Error for raw (high dimensional) input is : {}%'.format(100 * te_err))
+
+te_err = eval_knn(xTr.T, yTr.flatten(), L0[0:3].T, xTe.T, yTe.flatten(), k)
+print('--> 1-NN Error for PCA is : {}%'.format(100 * te_err))
+
+te_err = eval_knn(lda_xtr, yTr.flatten(), np.eye(3), lda_xte, yTe.flatten(), k)
+print('--> 1-NN Error for PCA-LDA input is : {}%'.format(100 * te_err))
+
+te_err = eval_knn(xTr.T, yTr.flatten(), lmnn.components_[0:3].T, xTe.T, yTe.flatten(), k)
+print('--> 1-NN Error for LMNN is : {}%'.format(100 * te_err))
+
+# ################################ 3-D Plot ###################################
+print("\n--> Plotting figures")
+fig = plt.figure(figsize=plt.figaspect(1))
+ax1 = fig.add_subplot(2, 2, 1, projection='3d')
+ax1.set_title("PCA")
 pts_to_plt = L0[0:3] @ xTr
+
 for l in np.unique(yTr):
     mask = np.squeeze(yTr == l)
-    ax.scatter(pts_to_plt[0, mask], pts_to_plt[1, mask], pts_to_plt[2, mask], label=l)
+    ax1.scatter(pts_to_plt[0, mask], pts_to_plt[1, mask], pts_to_plt[2, mask], label=l)
 plt.legend()
+
+ax2 = fig.add_subplot(2, 2, 2, projection='3d')
+ax2.set_title("PCA-LDA")
+pts_to_plt = lda_xtr.T
+
+for l in np.unique(yTr):
+    mask = np.squeeze(yTr == l)
+    ax2.scatter(pts_to_plt[0, mask], pts_to_plt[1, mask], pts_to_plt[2, mask], label=l)
+plt.legend()
+
+ax3 = fig.add_subplot(2, 2, 3, projection='3d')
+ax3.set_title("LMNN")
+pts_to_plt = lmnn.transform(xTr.T).T
+for l in np.unique(yTr):
+    mask = np.squeeze(yTr == l)
+    ax3.scatter(pts_to_plt[0, mask], pts_to_plt[1, mask], pts_to_plt[2, mask], label=l)
+plt.legend()
+
+ax4 = fig.add_subplot(2, 2, 4, projection='3d')
+ax4.set_title("LMNN")
+
 plt.show()
