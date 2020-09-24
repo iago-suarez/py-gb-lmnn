@@ -1,16 +1,147 @@
 # Regression tree implementation based on the original one from:
 # Kedem, D., Tyree, S., Sha, F., Lanckriet, G. R., & Weinberger, K. Q. (2012).
 # Non-linear metric learning. In NIPS (pp. 2573-2581).
+import random
+from collections import deque
+from copy import deepcopy
+
 import numpy as np
 
 
-class TreeInfo:
-    def __init__(self, index, piv, radius, jumpindex, kids):
-        self.index = index
-        self.piv = piv
+class MTree:
+    def __init__(self, index, pivots_x, radius, jumpindex, kids, n_nodes, max_leaf_samples):
+        """
+        Regression tree
+        :param index: (n_samples, ) New indices of points (random permutation of inputs)
+        :param pivots_x: (19, n_nodes) locations of pivots
+        :param radius: (n_nodes, ) radius of trees
+        :param jumpindex: (2, n_nodes) array. jumpindex of trees (tree i goes from ji[0, i]:ji[1, i] )
+        :param kids: (2, n_nodes) kids of trees (tree i has kids kids[0, i] and kids[1, i])
+        :param n_nodes: Number of nodes in the tree.
+        """
+        self.pivots_x = pivots_x
         self.radius = radius
         self.jumpindex = jumpindex
         self.kids = kids
+        self.index = index
+        self.n_nodes = n_nodes
+        self.max_leaf_samples = max_leaf_samples
+
+    @classmethod
+    def build(cls, X, max_leaf_samples=15):
+        """
+        Builds a new MTree. The policy to build the tree is to split the data until each leaf contains has less
+         than max_leaf_samples elements samples. To split the data in two braches we pseudo-randomly select two pivot
+         samples in the extremes of the branch and split the elements in closer to pivot1 and to pivot2.
+
+        :param X: input vectors (rows are vectors)
+        :param max_leaf_samples: maximum number of points in leaf
+        :return: A new tree
+        """
+
+        MIN_RADIUS = 0.0001
+
+        class TreeNode:
+            def __init__(self, number=None, ij=None):
+                """
+                A node of the tree that contains a
+                :param number: The identifier of the node
+                :param ij: The indices over the array of samples that point to the start and end of the tree region.
+                """
+                self.number = number
+                self.ij = ij
+
+            def __str__(self):
+                return "number: {}, ij [{}, {}]".format(self.number, self.ij[0], self.ij[1])
+
+        # TODO avoid this transpose
+        X = X.T.copy()
+
+        N, DIM = X.shape
+        tree = MTree(index=np.zeros(N, dtype=int),
+                     pivots_x=np.zeros((DIM, N)),
+                     radius=np.zeros(N),
+                     jumpindex=np.zeros((2, N), dtype=int),
+                     kids=np.zeros((2, N), dtype=int),
+                     n_nodes=0,
+                     max_leaf_samples=max_leaf_samples)
+
+        # Initialize some variables
+        index = np.arange(N)
+        tree.n_nodes = 0
+        s = deque()
+        c = TreeNode(0, (0, N - 1))
+        s.append(deepcopy(c))
+        while len(s) > 0:
+            random.seed(0)
+            c = s.pop()  # pop first element from stack
+            i1, i2 = c.ij[0], c.ij[1]  # set first and last index
+            ni = i2 - i1 + 1  # compute length of interval
+            # Select the data that fall in the current node
+            node_indices = index[i1:(i2 + 1)]
+            node_X = X[node_indices]
+            # The pivot is the mean of the samples in the interval
+            piv = np.mean(node_X, axis=0)  # get memory for pivot
+            # Compute radius of ball. Finds the maximum L2 distance between vector piv and all rows in matrix x
+            radius = np.sqrt(np.sum((node_X - piv) ** 2, axis=1).max())
+
+            # Set node parameters
+            tree.jumpindex[:, c.number] = [i1 + 1, i2 + 1]
+            tree.radius[c.number] = radius
+            tree.pivots_x[:, c.number] = piv
+
+            if ni < max_leaf_samples or radius < MIN_RADIUS:
+                # if tree has fewer than max_leaf_samples data points or a very small radius, make it a leaf
+                tree.kids[:, c.number] = [-1, -1]  # indicate leaf node (through -1 kids)
+            else:
+                # compute statistics about pivot points
+                tree.kids[:, c.number] = [tree.n_nodes + 2, tree.n_nodes + 3]
+                # pick two points that are far away from each other
+                r = np.random.randint(0, ni)
+                # Index of point far away from r. Finds the maximum L2 distance between vector
+                # node_X[r] and the cols in X.
+                pivot1 = np.argmax(np.sum((node_X - node_X[r]) ** 2, axis=1))
+                # Index of point fra away from pivot1
+                pivot2 = np.argmax(np.sum((node_X - node_X[pivot1]) ** 2, axis=1))
+                # compute dir=(x1-x2) and project each point onto this direction
+                dir = node_X[pivot1] - node_X[pivot2]
+                ips = node_X @ dir
+                # decide if the projected point is closer to pivot 1 or pivot 2
+                closer_to_pivot1 = ips > ips.mean()
+                closer_to_pivot2 = ~closer_to_pivot1
+                c1, c2 = np.sum(closer_to_pivot1), np.sum(closer_to_pivot2)
+                # Fill the first elements of ind1 with the values of index where ips > np.mean(ips)
+                index[i1:(i2 + 1)] = np.append(node_indices[closer_to_pivot1],
+                                               node_indices[closer_to_pivot2])
+
+                # Prevent potential infinite loop
+                if c1 == 0 or c2 == 0:
+                    raise Exception("A subtree with 0 elements was created. This should never happen!")
+
+                # push subtree 1 onto the stack
+                s.append(TreeNode(tree.n_nodes + 1, [i1, i1 + c1 - 1]))
+                # push subtree 2 onto the stack
+                s.append(TreeNode(tree.n_nodes + 2, [i1 + c1, i2]))
+                tree.n_nodes += 2
+
+        tree.index = index + 1
+        tree.cut_off_zeros()
+        ########################################################################
+        return tree
+
+    def fit(self, X, y):
+        print("--> Training my tree")
+        pass
+
+    def predict(self, X):
+        print("--> Using my tree")
+        return 1.2
+
+    def cut_off_zeros(self):
+        self.pivots_x = self.pivots_x[:, :self.n_nodes]
+        self.radius = self.radius[:self.n_nodes]
+        self.jumpindex = self.jumpindex[:, :self.n_nodes]
+        self.kids = self.kids[:, :self.n_nodes]
 
 
 class DataObject:
@@ -53,23 +184,6 @@ def preprocesslayer_sqrimpurity(data: DataObject, options):
         featurecosts = np.zeros(data.numfeatures, 1)
 
     return m_infty, l_infty, parents[:, 4:].T, featurecosts
-
-
-def buildmtreemex(x, mi):
-    """
-
-    :param x: input vectors (columns are vectors)
-    :param mi: maximum number of points in leaf
-    :return: A struct containing:
-        - index: [1×198 double]
-        - piv: [19×11 double]
-        - radius: [154.2278 73.6423 98.4881 69.5657 83.9020 46.9396 40.5655 49.0868 72.0262 37.8169 50.5862]
-        - jumpindex: [2×11 double]
-        - kids: [2×11 double]
-    """
-    tree = TreeInfo(None, None, None, None, None)
-    # TODO
-    return tree
 
 
 def usemtreemex(xtest, xtrain, tree, k):
