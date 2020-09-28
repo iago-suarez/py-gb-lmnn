@@ -3,9 +3,85 @@
 # Non-linear metric learning. In NIPS (pp. 2573-2581).
 import random
 from collections import deque
-from copy import deepcopy
 
 import numpy as np
+
+
+class MinHeapTree:
+    def __init__(self, d):
+        """
+        Implementation of the min heap tree-based structure. The tree will be almost complete,
+         satisging the following property: the key of P is less than or equal to the key of any of its children.
+        :param d: Maximum number of nodes (k in k-NN)
+        """
+        self.heapmaxsize = d
+        self.heapsize = 0
+        self.heapnodes = np.zeros(self.heapmaxsize)
+        self.heapdata = np.zeros(self.heapmaxsize, dtype=int)
+
+    def heapswaproot(self, key, data):
+        ind, child1, child2 = 0, 0, 0
+        hsize = self.heapsize
+
+        self.heapnodes[ind] = key  # overwrite key
+        self.heapdata[ind] = data  # overwrite data
+
+        first_child = lambda a: (a * 2 + 1)
+        second_child = lambda a: (a * 2 + 2)
+        while True:
+            child1, child2 = first_child(ind), second_child(ind)
+            if child2 >= hsize:
+                if child1 >= hsize:
+                    break
+                else:
+                    bigkey, bigchild = self.heapnodes[child1], child1
+            else:
+                key1, key2 = self.heapnodes[child1], self.heapnodes[child2]
+                bigkey, bigchild = (key1, child1) if key1 > key2 else (key2, child2)
+
+            if bigkey > key:
+                self.heapswap(ind, bigchild)
+            else:
+                break
+            ind = bigchild
+
+    def heapupdate(self, key, data):
+        # print("   --> Updating tree with key: {:.4f}, data: {}".format(key, data))
+        # check if an element should be entered into the tree and if so, do so
+        if self.heapsize < self.heapmaxsize:
+            self.heapinsert(key, data)
+        elif self.heapnodes[0] > key:
+            self.heapswaproot(key, data)
+
+    def heappoproot(self):
+        # Remove the root of the tree and fix the remaining structure
+
+        # if tree is of size 0, return
+        if self.heapsize == 0:
+            return
+
+        # take last element
+        key = self.heapnodes[self.heapsize - 1]
+        data = self.heapdata[self.heapsize - 1]
+        self.heapsize -= 1
+        # and overwrite the root
+        self.heapswaproot(key, data)
+
+    def heapswap(self, ind1, ind2):
+        self.heapnodes[ind2], self.heapnodes[ind1] = self.heapnodes[ind1], self.heapnodes[ind2]
+        self.heapdata[ind2], self.heapdata[ind1] = self.heapdata[ind1], self.heapdata[ind2]
+
+    def heapinsert(self, key, data):
+        ind = self.heapsize
+        self.heapsize += 1
+        self.heapnodes[ind] = key
+        self.heapdata[ind] = data
+
+        pa = np.floor((ind - 1) / 2)
+        while ind > 0 and self.heapnodes[pa] < self.heapnodes[ind]:
+            self.heapswap(ind, pa)
+            ind = pa
+            pa = np.floor((ind - 1) / 2)
 
 
 class MTree:
@@ -69,9 +145,8 @@ class MTree:
         # Initialize some variables
         index = np.arange(N)
         tree.n_nodes = 0
-        s = deque()
-        c = TreeNode(0, (0, N - 1))
-        s.append(deepcopy(c))
+        s = deque()  # This stack will contain the elements that we have to process
+        s.append(TreeNode(0, (0, N - 1)))  # Add the root node of the tree
         while len(s) > 0:
             random.seed(0)
             c = s.pop()  # pop first element from stack
@@ -124,10 +199,69 @@ class MTree:
                 s.append(TreeNode(tree.n_nodes + 2, [i1 + c1, i2]))
                 tree.n_nodes += 2
 
-        tree.index = index + 1
         tree.cut_off_zeros()
         ########################################################################
         return tree
+
+    def _findknn(self, X, X_test, k):
+        assert X.ndim == 2 and X_test.ndim == 1 and X.shape[1] == len(X_test)
+        # The stack will contain pairs in format (node, distance)
+        stack = deque()
+        stack.append((0, 0))
+        heap = MinHeapTree(k)
+
+        while True:
+            try:
+                while True:
+                    node, mindist = stack.pop()
+                    fb = len(stack)
+                    if heap.heapsize != k or fb < 0 or mindist <= heap.heapnodes[0]:
+                        # Break internal loop if the stack is empty, the heap size is not k or the
+                        # minimum distance has fell below the heap node distance
+                        break
+            except IndexError:
+                break
+
+            kid1 = self.kids[0, node] - 1
+            if kid1 < 0:  # leaf
+                dists = np.linalg.norm(X[self.jumpindex[0, node]:(1 + self.jumpindex[1, node])] - X_test, axis=1)
+                if k == 1:
+                    i = np.argmin(dists)
+                    heap.heapupdate(dists[i], self.jumpindex[0, node] + i)
+                else:
+                    i_s = np.argsort(-dists)[:k]
+                    for i in i_s:
+                        heap.heapupdate(dists[i], self.jumpindex[0, node] + i)
+
+            else:
+                kid2 = self.kids[1, node] - 1
+                d1 = np.linalg.norm(self.pivots_x[:, kid1] - X_test)
+                d2 = np.linalg.norm(self.pivots_x[:, kid2] - X_test)
+                # print("  --> kid1: {}, kid2: {}, d1: {:.3f}, d2: {:.3f}".format(kid1, kid2, d1, d2))
+                if d1 < d2:
+                    # if kid1 is the closer child
+                    stack.append((kid2, max(d2 - self.radius[kid2], 0)))
+                    stack.append((kid1, max(d1 - self.radius[kid1], 0)))
+                else:
+                    # if kid2 is the closer child
+                    stack.append((kid1, max(d1 - self.radius[kid1], 0)))
+                    stack.append((kid2, max(d2 - self.radius[kid2], 0)))
+
+        return heap.heapdata[0], heap.heapnodes[0]
+
+    def findknn(self, X, X_test, k):
+        # TODO Avoid transpose
+        X, X_test = X.T.copy(), X_test.T.copy()
+
+        # Get the number of elements in the input argument.
+        N, DIM = X_test.shape
+        iknn = np.zeros((N, k), dtype=int)
+        dists = np.zeros((N, k), dtype=float)
+        for i in range(N):
+            iknn[i], dists[i] = self._findknn(X, X_test[i], k)
+
+        # TODO Avoid transpose
+        return iknn.T, dists.T
 
     def fit(self, X, y):
         print("--> Training my tree")

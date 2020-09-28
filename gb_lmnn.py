@@ -1,7 +1,7 @@
 # Iago Suarez implementation of Non-linear Metric Learning
 import numpy as np
 
-from mtrees import buildmtreemex, usemtreemex, getlayer, buildtree, evaltree, evalensemble, DataObject
+from mtrees import usemtreemex, getlayer, buildtree, evaltree, evalensemble, DataObject, MTree
 
 
 def knncl(L, xTr, lTr, xTe, lTe, KK, train=True, test=True, cosigndist=0, blocksize=700, **kwargs):
@@ -51,7 +51,7 @@ def findtargetneighbors(X, labels, K, n_classes):
         jj = np.where(labels == i)
         # Samples of the class i
         Xu = X[:, jj]
-        T = buildmtreemex(Xu, 50)
+        T = MTree.build(Xu, 50)
         # Array of shape (4, len(Xu))
         targets = usemtreemex(Xu, Xu, T, K + 1)
         targets_ind[jj] = jj[targets[2:]].T
@@ -67,7 +67,7 @@ def findimpostors(pred, labels, n_classes, no_potential_impo):
         pi = pred[:, mask]
         jj = np.where(~mask)
         pj = pred[:, jj]
-        Tj = buildmtreemex(pj, 50)
+        Tj = MTree.build(pj, 50)
         active[:, mask] = jj[usemtreemex(pi, pj, Tj, no_potential_impo)]
 
     return active
