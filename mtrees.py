@@ -8,80 +8,27 @@ import numpy as np
 
 
 class MinHeapTree:
+
+    @property
+    def heapsize(self):
+        return len(self.elements)
+
+    @property
+    def heapnodes(self):
+        return np.array([e[0] for e in self.elements])
+
+    @property
+    def heapdata(self):
+        return np.array([e[1] for e in self.elements])
+
     def __init__(self, d):
-        """
-        Implementation of the min heap tree-based structure. The tree will be almost complete,
-         satisging the following property: the key of P is less than or equal to the key of any of its children.
-        :param d: Maximum number of nodes (k in k-NN)
-        """
         self.heapmaxsize = d
-        self.heapsize = 0
-        self.heapnodes = np.zeros(self.heapmaxsize)
-        self.heapdata = np.zeros(self.heapmaxsize, dtype=int)
-
-    def heapswaproot(self, key, data):
-        ind, child1, child2 = 0, 0, 0
-        hsize = self.heapsize
-
-        self.heapnodes[ind] = key  # overwrite key
-        self.heapdata[ind] = data  # overwrite data
-
-        first_child = lambda a: (a * 2 + 1)
-        second_child = lambda a: (a * 2 + 2)
-        while True:
-            child1, child2 = first_child(ind), second_child(ind)
-            if child2 >= hsize:
-                if child1 >= hsize:
-                    break
-                else:
-                    bigkey, bigchild = self.heapnodes[child1], child1
-            else:
-                key1, key2 = self.heapnodes[child1], self.heapnodes[child2]
-                bigkey, bigchild = (key1, child1) if key1 > key2 else (key2, child2)
-
-            if bigkey > key:
-                self.heapswap(ind, bigchild)
-            else:
-                break
-            ind = bigchild
+        self.elements = []
 
     def heapupdate(self, key, data):
-        # print("   --> Updating tree with key: {:.4f}, data: {}".format(key, data))
-        # check if an element should be entered into the tree and if so, do so
-        if self.heapsize < self.heapmaxsize:
-            self.heapinsert(key, data)
-        elif self.heapnodes[0] > key:
-            self.heapswaproot(key, data)
-
-    def heappoproot(self):
-        # Remove the root of the tree and fix the remaining structure
-
-        # if tree is of size 0, return
-        if self.heapsize == 0:
-            return
-
-        # take last element
-        key = self.heapnodes[self.heapsize - 1]
-        data = self.heapdata[self.heapsize - 1]
-        self.heapsize -= 1
-        # and overwrite the root
-        self.heapswaproot(key, data)
-
-    def heapswap(self, ind1, ind2):
-        self.heapnodes[ind2], self.heapnodes[ind1] = self.heapnodes[ind1], self.heapnodes[ind2]
-        self.heapdata[ind2], self.heapdata[ind1] = self.heapdata[ind1], self.heapdata[ind2]
-
-    def heapinsert(self, key, data):
-        ind = self.heapsize
-        self.heapsize += 1
-        self.heapnodes[ind] = key
-        self.heapdata[ind] = data
-
-        pa = np.floor((ind - 1) / 2)
-        while ind > 0 and self.heapnodes[pa] < self.heapnodes[ind]:
-            self.heapswap(ind, pa)
-            ind = pa
-            pa = np.floor((ind - 1) / 2)
+        self.elements.append((key, data))
+        self.elements.sort(key=lambda e: e[0])
+        self.elements = self.elements[:self.heapmaxsize]
 
 
 class MTree:
@@ -215,21 +162,24 @@ class MTree:
                 while True:
                     node, mindist = stack.pop()
                     fb = len(stack)
-                    if heap.heapsize != k or fb < 0 or mindist <= heap.heapnodes[0]:
-                        # Break internal loop if the stack is empty, the heap size is not k or the
-                        # minimum distance has fell below the heap node distance
+                    # If we dont have at least k neighbors, there is no more elements
+                    # in the stack or mindist is bigger than the worse neighbor
+                    if heap.heapsize != k or fb < 0 or mindist <= heap.elements[-1][0]:
+                        # Break internal loop
                         break
             except IndexError:
                 break
 
+            # print(f"--> node: {node}, indices: [{self.jumpindex[0, node]}, {self.jumpindex[1, node]}]")
             kid1 = self.kids[0, node] - 1
             if kid1 < 0:  # leaf
+                # print("   --> Reached leaf node")
                 dists = np.linalg.norm(X[self.jumpindex[0, node]:(1 + self.jumpindex[1, node])] - X_test, axis=1)
                 if k == 1:
                     i = np.argmin(dists)
                     heap.heapupdate(dists[i], self.jumpindex[0, node] + i)
                 else:
-                    i_s = np.argsort(-dists)[:k]
+                    i_s = np.argsort(dists)[:k]
                     for i in i_s:
                         heap.heapupdate(dists[i], self.jumpindex[0, node] + i)
 
@@ -247,21 +197,29 @@ class MTree:
                     stack.append((kid1, max(d1 - self.radius[kid1], 0)))
                     stack.append((kid2, max(d2 - self.radius[kid2], 0)))
 
-        return heap.heapdata[0], heap.heapnodes[0]
+        return heap.heapdata, heap.heapnodes
 
     def findknn(self, X, X_test, k):
-        # TODO Avoid transpose
-        X, X_test = X.T.copy(), X_test.T.copy()
+        X, X_test = X.T[self.index], X_test.T
+
+        # do some basic checks:
+        if X_test.shape[1] != X.shape[1]:
+            raise ValueError('Training and Test data must have same dimensions!')
+
+        assert self.pivots_x.shape[0] == X.shape[1] == X_test.shape[1]
 
         # Get the number of elements in the input argument.
         N, DIM = X_test.shape
         iknn = np.zeros((N, k), dtype=int)
         dists = np.zeros((N, k), dtype=float)
         for i in range(N):
+            # print(f"Procesing sample i = {i}")
             iknn[i], dists[i] = self._findknn(X, X_test[i], k)
+            # print(f" [found NN: {iknn[i]}, d: {dists[i]}]")
 
         # TODO Avoid transpose
-        return iknn.T, dists.T
+        iknn = self.index.astype(int)[iknn.T]
+        return iknn, dists.T
 
     def fit(self, X, y):
         print("--> Training my tree")

@@ -4,6 +4,7 @@ from scipy.io import loadmat
 
 from main import knnclassifytreeomp
 from mtrees import MTree
+import numpy as np
 
 
 class TestTreeInfo(TestCase):
@@ -31,6 +32,8 @@ class TestTreeInfo(TestCase):
         _, _, _, index, piv, radius, jumpindex, kids = loadmat('../data/my_tree.mat').values()
         n_nodes = len(radius.flatten())
         tree = MTree(index.flatten() - 1, piv, radius.flatten(), jumpindex - 1, kids, n_nodes, 15)
-        err = knnclassifytreeomp([], xTr, yTr.astype(int), xTe, yTe.astype(int), 1, tree=tree)
-
-        print("1-NN Error: " + str(err) + "%")
+        yTr, yTe = yTr.astype(int).flatten(), yTe.astype(int).flatten()
+        eval, details, _ = knnclassifytreeomp([], xTr, yTr, xTe, yTe, 1, tree=tree)
+        expected_eval = np.array([[0.04473304], [0.04112554]])
+        print(f"1-NN Error: {100 * eval[1][0]}%")
+        self.assertTrue(np.allclose(expected_eval, eval))

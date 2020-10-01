@@ -17,22 +17,7 @@ def findknnmtreeomp(x, testx, k):
 
 
 def usemtreemexomp(xtest, xtrain, tree, k):
-    """
-
-    :param xtest:
-    :param xtrain:
-    :param tree:
-    :param k:
-    :return:
-    """
-    # do some basic checks:
-    if xtest.shape[0] != xtrain.shape[0]:
-        raise ValueError('Training and Test data must have same dimensions!')
-
-    assert tree.pivots_x.shape[0] == xtrain.shape[0] == xtest.shape[0]
-    iknn, dists = tree.findknn(xtrain[:, tree.index], xtest, k)
-    iknn = tree.index.astype(int)[iknn]
-    return iknn, dists
+    return tree.findknn(xtrain, xtest, k)
 
 
 def LSKnn2(Ni, KK, MM):
@@ -103,8 +88,9 @@ def knnclassifytreeomp(L, xTr, lTr, xTe, lTe, KK, tree=None, treesize=15, train=
         - 'teesize',15 (max number of elements in leaf)
         - 'train',1  (0 means no training error)
     """
-    assert xTr.shape[1] == len(lTr.flatten())
-    assert xTe.shape[1] == len(lTe.flatten())
+    assert lTr.ndim == 1, lTe.ndim == 1
+    assert xTr.shape[1] == len(lTr)
+    assert xTe.shape[1] == len(lTe)
 
     if len(L) == 0:
         dim = xTr.shape[0]
@@ -150,7 +136,7 @@ def knnclassifytreeomp(L, xTr, lTr, xTe, lTe, KK, tree=None, treesize=15, train=
     assert dists.ndim == 2 and dists.shape == (1, NTe)
 
     # Labels of the testing elements in the training set
-    lTe2 = LSKnn2(lTr.flatten()[iTe], KK, MM)
+    lTe2 = LSKnn2(lTr[iTe], KK, MM)
     # Compute the error for each k
     Eval[1] = np.sum(lTe2 != np.repeat(lTe, KK, axis=0), axis=1) / NTe
 
@@ -159,18 +145,17 @@ def knnclassifytreeomp(L, xTr, lTr, xTe, lTe, KK, tree=None, treesize=15, train=
         # Use the tree to compute the distance between the training points
         iTr, dists = usemtreemexomp(xTr, xTr, tree, Kn + 1)
         iTr = iTr[1:]
-        lTr2 = LSKnn2(lTr(iTr), KK, MM)
+        lTr2 = LSKnn2(lTr[iTr], KK, MM)
         Eval[0, :] = np.sum(lTr2 != np.repeat(lTr, KK, axis=0), axis=1) / NTr
 
         Details['lTr2'] = lTr2
         Details['iTr'] = iTr
     else:
-        # TODO
         Eval[0] = []
 
     Details['lTe2'] = lTe2
     Details['iTe'] = iTe
-    Eval = Eval[:, outputK]
+    # Eval = Eval[:, outputK]
     return Eval, Details, tree
 
 
