@@ -127,7 +127,7 @@ def knnclassifytreeomp(L, xTr, lTr, xTe, lTe, KK, tree=None, treesize=15, train=
     # else:
     #     outputK = range(0, len(KK))
     outputK = 1
-
+    print("Evaluating...")
     Eval = np.zeros((2, KK))
     # Use the tree to compute the distance between the testing and training points
     # iTe: indices of the testing elements in the training set
@@ -176,13 +176,13 @@ def main():
     # Load variables
     print("--> Loading data")
     _, _, _, xTe, xTr, xVa, yTr, yTe, yVa = loadmat('data/segment.mat').values()
+    yTr, yTe = yTr.flatten(), yTe.flatten()
+    err, _, _ = knnclassifytreeomp([], xTr, yTr, xTe, yTe, 1)
 
-    # err, _, _ = knnclassifytreeomp([], xTr, yTr, xTe, yTe, 1)
-    #
-
-    # err, _, _ = knnclassifytreeomp(L0[0:3], xTr, yTr, xTe, yTe, 1)
-    # print('\n')
-    # print('1-NN Error after PCA in 3d is : {}%'.format(100 * err[1]))
+    L0 = pca(xTr)
+    err, _, _ = knnclassifytreeomp(L0[0:3], xTr, yTr, xTe, yTe, 1)
+    print('\n')
+    print('1-NN Error after PCA in 3d is : {}%'.format(100 * err[1]))
 
     print("--> Training pca...")
     L0 = pca(xTr, whiten=True)[0].T

@@ -31,7 +31,7 @@ class TestTreeInfo(TestCase):
         _, _, _, xTe, xTr, xVa, yTr, yTe, yVa = loadmat('../data/segment.mat').values()
         _, _, _, index, piv, radius, jumpindex, kids = loadmat('../data/my_tree.mat').values()
         n_nodes = len(radius.flatten())
-        tree = MTree(index.flatten() - 1, piv, radius.flatten(), jumpindex - 1, kids, n_nodes, 15)
+        tree = MTree(index.flatten() - 1, piv, radius.flatten(), jumpindex - 1, kids - 1, n_nodes, 15)
         yTr, yTe = yTr.astype(int).flatten(), yTe.astype(int).flatten()
         eval, details, _ = knnclassifytreeomp([], xTr, yTr, xTe, yTe, 1, tree=tree)
         expected_eval = np.array([[0.04473304], [0.04112554]])

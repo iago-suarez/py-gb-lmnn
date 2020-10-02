@@ -3,3 +3,4 @@ metric-learn
 numpy>=1.18.1
 scikit-learn>=0.22.2.post1
 scipy>=1.4.1
+tqdm

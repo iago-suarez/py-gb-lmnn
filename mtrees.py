@@ -5,6 +5,7 @@ import random
 from collections import deque
 
 import numpy as np
+from tqdm import tqdm
 
 
 class MinHeapTree:
@@ -81,7 +82,7 @@ class MTree:
         X = X.T.copy()
 
         N, DIM = X.shape
-        tree = MTree(index=np.zeros(N, dtype=int),
+        tree = MTree(index=np.arange(N, dtype=int),
                      pivots_x=np.zeros((DIM, N)),
                      radius=np.zeros(N),
                      jumpindex=np.zeros((2, N), dtype=int),
@@ -90,7 +91,6 @@ class MTree:
                      max_leaf_samples=max_leaf_samples)
 
         # Initialize some variables
-        index = np.arange(N)
         tree.n_nodes = 0
         s = deque()  # This stack will contain the elements that we have to process
         s.append(TreeNode(0, (0, N - 1)))  # Add the root node of the tree
@@ -100,7 +100,7 @@ class MTree:
             i1, i2 = c.ij[0], c.ij[1]  # set first and last index
             ni = i2 - i1 + 1  # compute length of interval
             # Select the data that fall in the current node
-            node_indices = index[i1:(i2 + 1)]
+            node_indices = tree.index[i1:(i2 + 1)]
             node_X = X[node_indices]
             # The pivot is the mean of the samples in the interval
             piv = np.mean(node_X, axis=0)  # get memory for pivot
@@ -108,7 +108,7 @@ class MTree:
             radius = np.sqrt(np.sum((node_X - piv) ** 2, axis=1).max())
 
             # Set node parameters
-            tree.jumpindex[:, c.number] = [i1 + 1, i2 + 1]
+            tree.jumpindex[:, c.number] = [i1, i2]
             tree.radius[c.number] = radius
             tree.pivots_x[:, c.number] = piv
 
@@ -117,7 +117,7 @@ class MTree:
                 tree.kids[:, c.number] = [-1, -1]  # indicate leaf node (through -1 kids)
             else:
                 # compute statistics about pivot points
-                tree.kids[:, c.number] = [tree.n_nodes + 2, tree.n_nodes + 3]
+                tree.kids[:, c.number] = [tree.n_nodes + 1, tree.n_nodes + 2]
                 # pick two points that are far away from each other
                 r = np.random.randint(0, ni)
                 # Index of point far away from r. Finds the maximum L2 distance between vector
@@ -133,8 +133,8 @@ class MTree:
                 closer_to_pivot2 = ~closer_to_pivot1
                 c1, c2 = np.sum(closer_to_pivot1), np.sum(closer_to_pivot2)
                 # Fill the first elements of ind1 with the values of index where ips > np.mean(ips)
-                index[i1:(i2 + 1)] = np.append(node_indices[closer_to_pivot1],
-                                               node_indices[closer_to_pivot2])
+                tree.index[i1:(i2 + 1)] = np.append(node_indices[closer_to_pivot1],
+                                                    node_indices[closer_to_pivot2])
 
                 # Prevent potential infinite loop
                 if c1 == 0 or c2 == 0:
@@ -146,6 +146,7 @@ class MTree:
                 s.append(TreeNode(tree.n_nodes + 2, [i1 + c1, i2]))
                 tree.n_nodes += 2
 
+        tree.n_nodes += 1
         tree.cut_off_zeros()
         ########################################################################
         return tree
@@ -171,7 +172,7 @@ class MTree:
                 break
 
             # print(f"--> node: {node}, indices: [{self.jumpindex[0, node]}, {self.jumpindex[1, node]}]")
-            kid1 = self.kids[0, node] - 1
+            kid1 = self.kids[0, node]
             if kid1 < 0:  # leaf
                 # print("   --> Reached leaf node")
                 dists = np.linalg.norm(X[self.jumpindex[0, node]:(1 + self.jumpindex[1, node])] - X_test, axis=1)
@@ -184,7 +185,7 @@ class MTree:
                         heap.heapupdate(dists[i], self.jumpindex[0, node] + i)
 
             else:
-                kid2 = self.kids[1, node] - 1
+                kid2 = self.kids[1, node]
                 d1 = np.linalg.norm(self.pivots_x[:, kid1] - X_test)
                 d2 = np.linalg.norm(self.pivots_x[:, kid2] - X_test)
                 # print("  --> kid1: {}, kid2: {}, d1: {:.3f}, d2: {:.3f}".format(kid1, kid2, d1, d2))
@@ -212,7 +213,7 @@ class MTree:
         N, DIM = X_test.shape
         iknn = np.zeros((N, k), dtype=int)
         dists = np.zeros((N, k), dtype=float)
-        for i in range(N):
+        for i in tqdm(range(N)):
             # print(f"Procesing sample i = {i}")
             iknn[i], dists[i] = self._findknn(X, X_test[i], k)
             # print(f" [found NN: {iknn[i]}, d: {dists[i]}]")
