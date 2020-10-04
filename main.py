@@ -8,6 +8,7 @@ from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.neighbors import KNeighborsClassifier
 from sklearn.pipeline import Pipeline
 
+from gb_lmnn import gb_lmnn
 from mtrees import MTree
 
 
@@ -92,11 +93,8 @@ def knnclassifytreeomp(L, xTr, lTr, xTe, lTe, KK, tree=None, treesize=15, train=
     assert xTr.shape[1] == len(lTr)
     assert xTe.shape[1] == len(lTe)
 
-    if len(L) == 0:
-        dim = xTr.shape[0]
-    else:
+    if len(L) != 0:
         # L is the initial linear projection, for example PCa or LDA
-        dim = L.shape[1]
         xTr = L @ xTr
         xTe = L @ xTe
 
@@ -120,13 +118,6 @@ def knnclassifytreeomp(L, xTr, lTr, xTe, lTe, KK, tree=None, treesize=15, train=
                          'Max index of tree: ' + str(kwargs['tree'].jumpindex.max()) +
                          ' Length of training data: ' + str(NTr))
 
-    # TODO
-    # if len(KK) == 1:
-    #     outputK = KK
-    #     KK = range(0, KK)
-    # else:
-    #     outputK = range(0, len(KK))
-    outputK = 1
     print("Evaluating...")
     Eval = np.zeros((2, KK))
     # Use the tree to compute the distance between the testing and training points

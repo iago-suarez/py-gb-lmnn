@@ -213,7 +213,7 @@ class MTree:
         N, DIM = X_test.shape
         iknn = np.zeros((N, k), dtype=int)
         dists = np.zeros((N, k), dtype=float)
-        for i in tqdm(range(N)):
+        for i in range(N):
             # print(f"Procesing sample i = {i}")
             iknn[i], dists[i] = self._findknn(X, X_test[i], k)
             # print(f" [found NN: {iknn[i]}, d: {dists[i]}]")
@@ -247,12 +247,130 @@ class DataObject:
         self.tree = tree
 
 
-def buildlayer_sqrimpurity_openmp(Xs, Xi, y, n, f, args):
-    # This program chooses the best splits, finds the predictions, and computes the loss for the tree.
-    raise NotImplementedError()
+class StaticNode:
+    def __init__(self, m_infty_, label_length_, l_infty_):
+        self.label_length = label_length_
+        self.m_infty = m_infty_
+        self.l_infty = l_infty_
+        # Best split point found for this node
+        self.split = 0.0
+        # Best loss value found for this node
+        self.loss = np.inf
+        # m_s is a counter. The number of data points encountered so far that correspond to that node
+        self.m_s = 0
+        # # The previous feature value. It is used to select as split point.
+        self.previous_xs = 0.0
+        self.label = np.zeros(label_length_)
+        # # l_s is the total residual encountered so far corresponding to that node.
+        self.l_s = np.zeros(label_length_)
+
+    @classmethod
+    def create_from_children(cls, label_length_):
+        return cls(0.0, label_length_, np.zeros(label_length_))
 
 
-def preprocesslayer_sqrimpurity(data: DataObject, options):
+def feature_sqrimpurity_openmp_multi(Xs, Xi, Y, N, m_infty, l_infty, parents_labels, feature_cost, verbose=False):
+    numnodes = m_infty.shape[1]
+    assert N.max() < numnodes
+    numinstances = Xs.shape[0]
+    target_ndims = l_infty.shape[0]  # The number of dimensions in the output space
+
+    first = True
+    # instantiate parent and child layers of nodes
+    parents, children = [], []
+    for i in range(numnodes):
+        parents.append(StaticNode(int(m_infty[:, i]), target_ndims, l_infty[:, i]))
+
+        child1 = StaticNode.create_from_children(target_ndims)
+        child1.label = parents_labels[:, i]
+        children.append(child1)
+
+        child2 = StaticNode.create_from_children(target_ndims)
+        child2.label = parents_labels[:, i]
+        children.append(child2)
+
+    # iterate over examples
+    for j in range(numinstances):
+        # get current value
+        v = Xs[j]  # feature value from training set value
+        i = Xi[j]  # feature index that corresponds to the unsorted feature
+        node_index = N[i]  # node index on the parent layer for the instance
+        node = parents[node_index]  # node on the parent layer for the instance
+        if first:
+            first = False
+            print(f"----> v: {v}, i: {i}, node_index: {node_index}")
+
+        # If not first instance at node and greater than split point, consider new split at v
+        if node.m_s > 0 and v > node.previous_xs:
+            # compute split impurity
+            l_s_sqrnorm = np.sum(node.l_s ** 2)
+            l_infty_minus_l_s_sqrnorm = np.sum((node.l_infty - node.l_s) ** 2)
+
+            loss_i = - l_s_sqrnorm / node.m_s \
+                     - l_infty_minus_l_s_sqrnorm / (node.m_infty - node.m_s) \
+                     + feature_cost
+            if verbose:
+                print(f"****> impurity: l_s_sqrnorm = {l_s_sqrnorm}, m_s = {node.m_s}, "
+                      f"l_infty_minus_l_s_sqrnorm = {l_infty_minus_l_s_sqrnorm}, "
+                      f"m_infty - m_s = {(node.m_infty - node.m_s)}, feature_cost = {feature_cost}")
+
+            # compare with best and record if better
+            if loss_i < node.loss:
+                node.loss = loss_i
+                # The split point is the one between the actual best and the previous
+                node.split = 0.5 * (node.previous_xs + v)
+                # Set the labels for the node children
+                children[2 * node_index].label = node.l_s / node.m_s
+                children[2 * node_index + 1].label = (node.l_infty - node.l_s) / (node.m_infty - node.m_s)
+
+        # Update variable
+        node.m_s += 1  # m_s is a counter. The number of data points encountered so far that correspond to that node
+        node.l_s += Y[:, i]  # ls is the total residual encountered so far corresponding to that node.
+        node.previous_xs = v  # The previous feature value.
+
+    # Record output values for feature f
+    return [p.split for p in parents], \
+           [p.loss for p in parents], \
+           np.array([c.label for c in children])
+
+
+def buildlayer_sqrimpurity_openmp_multi(Xs, Xi, Y, N, features, m_infty, l_infty, parents_labels, feature_cost):
+    """
+    This program chooses the best splits, computes the loss, and finds the predictions for the tree.
+    :param Xs: Sorted samples in original space
+    :param Xi: Indices used to sort the elements in Xs
+    :param Y: Labels or Residuals
+    :param N: array of size Nx1, each element have the index of the node where that example falls.
+    :param features: Range of features to be used (Feature Index)
+    :param m_infty:
+    :param l_infty:
+    :param parents_labels:
+    :param feature_cost:
+    :return: splits, losses, labels
+    """
+    assert Xs.ndim == 2 and Xi.ndim == 2 and Xs.shape == Xi.shape
+    assert Y.ndim == 2 and Y.shape[1] == Xs.shape[0]
+    assert N.ndim == 1 and len(N) == Xs.shape[0]
+
+    numnodes = m_infty.shape[1]
+    numfeatures = len(features)
+    label_length = l_infty.shape[0]
+
+    # Create outputs
+    splits = np.zeros((numfeatures, numnodes))
+    losses = np.zeros((numfeatures, numnodes))
+    labels = np.zeros((numfeatures, 2 * numnodes, label_length))
+
+    for f in features.flatten():
+        print(f"--> f: {f}, feature: {f + 1}")
+        # Calculate for this feature the split point with the best square impurity level
+        splits[f], losses[f], labels[f] = feature_sqrimpurity_openmp_multi(
+            Xs[:, f], Xi[:, f], Y, N, m_infty, l_infty, parents_labels, feature_cost[f])
+
+    return splits, losses, labels.reshape(numfeatures, -1)
+
+
+def preprocesslayer_sqrimpurity(data: DataObject, featurecosts=None):
     # confirm necessary data or options
     assert isinstance(data, DataObject)
 
@@ -263,34 +381,35 @@ def preprocesslayer_sqrimpurity(data: DataObject, options):
     l_infty = -99999 * np.ones((numnodes, data.y.shape[1]))
     for i in range(numnodes):
         m_infty[i] = np.sum(data.n == i)
-        l_infty[i] = np.sum(data.y[data.n == i], axis=1)  # TODO is the axis right?
+        l_infty[i] = np.sum(data.y[data.n == i], axis=0)
 
     l_infty = l_infty.T
 
     # get parents
-    parents = getlayer(data.tree, data.depth)
+    parents = getlayer(data.tree, data.depth)[0]
 
     # include feature costs
-    if 'featurecosts' in options:
-        featurecosts = options['featurecosts']
-    else:
-        featurecosts = np.zeros(data.numfeatures, 1)
+    if featurecosts is None:
+        featurecosts = np.zeros(data.numfeatures)
 
-    return m_infty, l_infty, parents[:, 4:].T, featurecosts
+    return m_infty, l_infty, parents[:, 3:].T, featurecosts
 
 
+# TODO Delete
 def usemtreemex(xtest, xtrain, tree, k):
-    iknn, dists = None, None
-    # TODO
-    return iknn, dists
+    if xtest.shape[0] != xtrain.shape[0]:
+        raise ValueError('Training and Test data must have same dimensions!')
+
+    dim = tree.pivots_x.shape[0]
+    return tree.findknn(xtrain[:dim, tree.index], xtest[:dim], k)
 
 
 def getlayer(tree, depth):
     # Tree implementation with arrays
     # TODO Ensure that this is valid for the 0...N-1 numpy indexing
     maxdepth = np.log2(tree.shape[0] + 1)
-    rowindices = np.arange(2 ** (depth - 1), 2 ** depth - 1)
-    layer = tree[rowindices, :]
+    rowindices = np.arange(2 ** (depth - 1) - 1, 2 ** depth - 1)
+    layer = tree[rowindices]
     return layer, rowindices, maxdepth
 
 
@@ -300,8 +419,20 @@ def evaltree(X, tree):
     return p
 
 
-def buildtree(X, Xs, Xi, y, depth, kwargs):
-    tree, p = None, None
+def buildtree(X, Xs, Xi, y, depth, defaultlabel=None, buildlayer=None, preprocesslayer=None, featurecosts=None):
+    """
+     Perform gradient boosting: construct trees to minimize loss.
+    :param X: Input points in the original space.
+    :param Xs: X values sorted ascendant.
+    :param Xi: The indices that sort the input elements of X.
+    :param y: The negative of the gradient loss function. See equation (10) of the paper.
+    :param depth: Max-depth of the tree
+    :param defaultlabel: Function to generate default labels
+    :param buildlayer: Function to build a new layer
+    :param preprocesslayer: Function to pre-process a layer
+    :param featurecosts: Cost associated to each feature to be used in preprocesslayer function
+    :return: TODO
+    """
     # Handling the multilabel case where gradient is vectorized.
     if X.shape[0] < y.shape[0]:
         if y.shape[0] % X.shape[0] != 0:
@@ -317,41 +448,39 @@ def buildtree(X, Xs, Xi, y, depth, kwargs):
     RowsX, numfeatures = X.shape
     RowsXs, col = Xs.shape
 
-    # Cheks that the row dimensions of X
+    # Checks that the row dimensions of X
     if RowsX != RowsXs:
-        raise Exception('Row dimentions in X do not match row dimensions in Xs, Xi, or y')
+        raise Exception('Row dimensions in X do not match row dimensions in Xs, Xi, or y')
 
     #  initialize with each instance at the root node
-    n = np.ones((n_samples, 1))
+    n = np.zeros(n_samples, dtype=int)
 
     # initialize tree and compute default label
-    defaultlabel = kwargs['defaultlabel'](y) if 'defaultlabel' in kwargs else np.mean(y, axis=0)
+    defaultlabel = defaultlabel(y) if defaultlabel is not None else np.mean(y, axis=0)
 
     # initialize the root node with default prediction
-    tree = [np.zeros(1, 3), defaultlabel]
+    tree = np.append(np.zeros(3), defaultlabel)[np.newaxis]
 
     #  select function to build layer
-    buildlayer = kwargs['buildlayer'] if 'buildlayer' in kwargs else buildlayer_sqrimpurity_openmp
+    buildlayer = buildlayer if buildlayer is not None else buildlayer_sqrimpurity_openmp_multi
 
     # select function to preprocess layer construction
-    preprocesslayer = kwargs['preprocesslayer'] if 'preprocesslayer' in kwargs else preprocesslayer_sqrimpurity
+    preprocesslayer = preprocesslayer if preprocesslayer is not None else preprocesslayer_sqrimpurity
 
     # build tree layer-wise
     for d in range(depth - 1):
-        # initialize stuff
-        splits, impurity, labels = [], [], []
         # get parent nodes
-        parents = getlayer(tree, d)
+        parents = getlayer(tree, (d + 1))[0]
 
         # prepare data for preprocessing
-        data = DataObject(X.shape[1], y, n, d, tree)
+        data = DataObject(X.shape[1], y, n, (d + 1), tree)
 
         # compute preprocessed arguments
-        args = preprocesslayer(data, kwargs)
+        m_infty, l_infty, arg_parents, arg_featurecosts = preprocesslayer(data, featurecosts)
         f = np.arange(0, numfeatures)
         # Splits says for each feature the best split points, impurity the impurity leve and
         # labels has shape (n_features, n_classes)
-        splits, impurity, labels = buildlayer(Xs, Xi, y.T, n, f, args)
+        splits, impurity, labels = buildlayer(Xs, Xi, y.T, n, f, m_infty, l_infty, arg_parents, arg_featurecosts)
 
         # pick best splits for each node
         bestimpurity, bestfeatures = impurity.min(), np.argmin(impurity)
@@ -362,7 +491,7 @@ def buildtree(X, Xs, Xi, y, depth, kwargs):
         bestsplits = splits[indices]
 
         # record splits for parent nodes
-        pi = getlayer(tree, d)
+        pi = getlayer(tree, d + 1)
         tree[pi, 0:3] = [bestfeatures, bestsplits, bestimpurity]
 
         # record labels for child nodes

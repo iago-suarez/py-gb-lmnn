@@ -1,5 +1,7 @@
 # Iago Suarez implementation of Non-linear Metric Learning
 import numpy as np
+from scipy.io import loadmat
+from tqdm import tqdm
 
 from mtrees import usemtreemex, getlayer, buildtree, evaltree, evalensemble, DataObject, MTree
 
@@ -44,39 +46,95 @@ class Ensemble:
 
 
 def findtargetneighbors(X, labels, K, n_classes):
-    targets_ind = None
     D, N = X.shape
-    targets_ind = np.zeros((N, K))
+    targets_ind = np.zeros((N, K), dtype=int)
     for i in range(n_classes):
-        jj = np.where(labels == i)
+        jj, = np.where(labels == i)
         # Samples of the class i
         Xu = X[:, jj]
         T = MTree.build(Xu, 50)
         # Array of shape (4, len(Xu))
-        targets = usemtreemex(Xu, Xu, T, K + 1)
-        targets_ind[jj] = jj[targets[2:]].T
+        targets, _ = usemtreemex(Xu, Xu, T, K + 1)
+        targets_ind[jj] = jj[targets[1:]].T
 
     return targets_ind
 
 
 def findimpostors(pred, labels, n_classes, no_potential_impo):
+    print("  --> Finding impostors...")
     N = pred.shape[-1]
-    active = np.zeros(no_potential_impo, N)
-    for i in range(n_classes):
-        mask = np.where(labels == i)
-        pi = pred[:, mask]
-        jj = np.where(~mask)
+    active = np.zeros((no_potential_impo, N), dtype=int)
+    for i in tqdm(range(n_classes)):
+        ii, = np.where(labels == i)
+        pi = pred[:, ii]
+        jj, = np.where(labels != i)
         pj = pred[:, jj]
+        # Use a tree Tj to search in hard negatives of class i
         Tj = MTree.build(pj, 50)
-        active[:, mask] = jj[usemtreemex(pi, pj, Tj, no_potential_impo)]
+        active[:, ii] = jj[usemtreemex(pi, pj, Tj, no_potential_impo)[0]]
 
     return active
 
 
-def lmnnobj(pred, targets_ind, active):
+# def computeloss(X, & T[i * kt], & I[i * ki], d, kt, ki, i, grad):
+def computeloss(X, T, I, d, kt, ki, i, grad):
+    dt = np.zeros(kt)
+    lossT = 0.0
+    lossI = 0.0
+    # compute distances to target neighbors
+    for k in range(kt):
+        dt[k] = np.sum((X[:, i] - X[:, T[k]]) ** 2) + 1
+        # print("----------> dt[{}]: {}".format(k, dt[k]))
+        lossT += dt[k] - 1.0
+        # update gradient
+        grad[:, i] += X[:, i] - X[:, T[k]]
+        grad[:, T[k]] -= X[:, i] - X[:, T[k]]
+
+    ma = dt.max()
+    # print("-----------> ma: {}".format(ma))
+    #  compute distances to impostors
+    for k in range(ki):
+        dis = min(ma, np.sum((X[:, i] - X[:, I[k]]) ** 2))
+        # print("******> k: {}, dis: {}".format(k, dis))
+        for t in range(kt):
+            if dt[t] > dis:
+                lossI += dt[t] - dis
+
+                # Update gradient
+                grad[:, i] -= X[:, T[t]] - X[:, I[k]]
+                grad[:, T[t]] -= X[:, i] - X[:, T[t]]
+                grad[:, I[k]] += X[:, i] - X[:, I[k]]
+                # grad(:,i) = grad(:,i)-mu*(pred(:,targets_i)-pred(:,impos_i(k)));
+                # grad(:,targets_i) = grad(:,targets_i)-mu*(pred(:,i)-pred(:,targets_i));
+                # grad(:,impos_i(k)) = grad(:,impos_i(k))+mu*(pred(:,i)-pred(:,impos_i(k)));
+    # print("----> lossT: {}, lossI: {}".format(lossT, lossI))
+    return 0.5 * (lossT + lossI)
+
+
+def lmnnobj(pred, targets_ind, active_ind):  # X, T, I
+    """
+    Computes the hinge loss and its gradient for the formula (8) of Non-linear Metric Learning:
+    .. math::
+        \mathcal{L}(\phi)=\sum_{i, j: j \sim i}\left\|\phi\left(\mathbf{x}_{i}\right)-\phi\left(\mathbf{x}_{j}\right)
+        \right\|_{2}^{2}+\mu \sum_{k: y_{i} \neq y_{k}}\left[1+\left\|\phi\left(\mathbf{x}_{i}\right)-\phi\left(
+        \mathbf{x}_{j}\right)\right\|_{2}^{2}-\left\|\phi\left(\mathbf{x}_{i}\right)-\phi\left(\mathbf{x}_{k}\right)
+        \right\|_{2}^{2}\right]_{+}
+    :param pred: Array of floats with shape (n_final_dims, n_samples).
+    The actual points X projected on the target low-dimensional space.
+    :param targets_ind: Array of integers with shape (n_final_dims, n_samples).
+    Indices of target neighbors, the ones that we want to keep close.
+    :param active_ind: Array of integers with shape (N_IMPOSTORS, n_samples). Impostor indices.
+    :return: The evaluation of the loss and its gradient
+    """
     n_dims, n_samples = pred.shape
     hinge, grad = np.zeros(n_samples), np.zeros((n_dims, n_samples))
-    # TODO
+    kt = targets_ind.shape[0]  # number of target neighbors
+    ki = active_ind.shape[0]  # number of impostors
+    for i in range(n_samples):
+        # print("--> i: " + str(i))
+        hinge[i] = computeloss(pred, targets_ind[:, i], active_ind[:, i], n_dims, kt, ki, i, grad)
+        # print("--> hinge: {}, grad: {}".format(hinge[i], grad[:, i]))
+
     return hinge, grad
 
 
@@ -101,6 +159,8 @@ def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no
     :return:
     """
     un, labels = np.unique(Y), Y
+    # Check that the labels have the correct format [0, 1, ..., L]
+    assert np.alltrue(un == np.arange(len(un)))
     embedding = None
     n_classes = len(un)
 
