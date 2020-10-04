@@ -1,10 +1,11 @@
+import sys
 from unittest import TestCase
 
 from scipy.io import loadmat
 
 from gb_lmnn import lmnnobj
 from main import knnclassifytreeomp
-from mtrees import MTree, buildtree, buildlayer_sqrimpurity_openmp_multi
+from mtrees import MTree, buildtree, buildlayer_sqrimpurity
 import numpy as np
 
 
@@ -68,21 +69,54 @@ class TestTreeInfo(TestCase):
         # TODO
         _, _, _, X, Xs, Xi, y, depth = loadmat('../data/buildtree1.mat').values()
         _, _, _, expected_tree, expected_p = loadmat('../data/buildtree1_result.mat').values()
-
-        defaultlabel = None
-        tree, p = buildtree(X, Xs, Xi - 1, y, int(depth), defaultlabel, buildlayer=buildlayer_sqrimpurity_openmp_multi)
+        # Non valid entries are -1 in python
+        expected_tree[:, 0] -= 1
+        expected_tree[expected_tree[:, 1] == 0, 1] = -1
+        expected_tree[expected_tree[:, 2] == 0, 2] = -1
+        expected_tree[4, 1] = 0.0
+        
+        tree, p = buildtree(X, Xs, Xi - 1, y, int(depth))
+        tree[tree == np.inf] = sys.float_info.max
+        tree[tree == -np.inf] = -sys.float_info.max
+        # The format of tree is: [bestfeature_index, best_split, best_impurity_loss, prediction * n_out_features]
 
         self.assertTrue(np.allclose(expected_tree, tree))
         self.assertTrue(np.allclose(expected_p, p))
 
-    def test_buildlayer(self):
+    def test_buildlayer_1node(self):
         Xs, Xi, y, n, f, m_infty, l_infty, parents_labels, feature_cost = \
-            list(loadmat('../data/build_layer_inputs.mat').values())[-1].flatten()
+            list(loadmat('../data/build_layer_inputs1.mat').values())[-1].flatten()
         _, _, _, expected_splits, expected_impurity, expected_labels = \
-            loadmat('../data/build_layer_outputs.mat').values()
+            loadmat('../data/build_layer_outputs1.mat').values()
 
-        splits, impurity, labels = buildlayer_sqrimpurity_openmp_multi(
-            Xs, Xi - 1, y, np.squeeze(n - 1), f - 1, m_infty, l_infty, parents_labels, feature_cost)
+        splits, impurity, labels = buildlayer_sqrimpurity(
+            Xs, Xi - 1, y, np.squeeze(n - 1), f - 1, m_infty.flatten(), l_infty, parents_labels, feature_cost)
+
+        self.assertTrue(np.allclose(expected_splits, splits))
+        self.assertTrue(np.allclose(expected_impurity, impurity))
+        self.assertTrue(np.allclose(expected_labels, labels))
+
+    def test_buildlayer_2nodes(self):
+        Xs, Xi, y, n, f, m_infty, l_infty, parents_labels, feature_cost = \
+            list(loadmat('../data/build_layer_inputs2.mat').values())[-1].flatten()
+        _, _, _, expected_splits, expected_impurity, expected_labels = \
+            loadmat('../data/build_layer_outputs2.mat').values()
+
+        splits, impurity, labels = buildlayer_sqrimpurity(
+            Xs, Xi - 1, y, np.squeeze(n - 1), f - 1, m_infty.flatten(), l_infty, parents_labels, feature_cost)
+
+        self.assertTrue(np.allclose(expected_splits, splits))
+        self.assertTrue(np.allclose(expected_impurity, impurity))
+        self.assertTrue(np.allclose(expected_labels, labels))
+
+    def test_buildlayer_4nodes(self):
+        Xs, Xi, y, n, f, m_infty, l_infty, parents_labels, feature_cost = \
+            list(loadmat('../data/build_layer_inputs4.mat').values())[-1].flatten()
+        _, _, _, expected_splits, expected_impurity, expected_labels = \
+            loadmat('../data/build_layer_outputs4.mat').values()
+
+        splits, impurity, labels = buildlayer_sqrimpurity(
+            Xs, Xi - 1, y, np.squeeze(n - 1), f - 1, m_infty.flatten(), l_infty, parents_labels, feature_cost)
 
         self.assertTrue(np.allclose(expected_splits, splits))
         self.assertTrue(np.allclose(expected_impurity, impurity))
