@@ -1,33 +1,14 @@
 # Iago Suarez implementation of Non-linear Metric Learning
+import collections
+from copy import deepcopy
+
 import numpy as np
-from scipy.io import loadmat
+import scipy
+from scipy.spatial.distance import cdist
 from tqdm import tqdm
 
-from mtrees import usemtreemex, getlayer, buildtree, evaltree, evalensemble, DataObject, MTree
-
-
-def knncl(L, xTr, lTr, xTe, lTe, KK, train=True, test=True, cosigndist=0, blocksize=700, **kwargs):
-    """
-
-    :param L: transformation matrix (learned by LMNN)
-    :param xTr: training vectors (each column is an instance)
-    :param lTr: training labels  (row vector!!)
-    :param xTe: test vectors
-    :param lTe: test labels
-    :param KK: number of nearest neighbors
-    :param train:
-    :param test:
-    :param cosigndist:
-    :param blocksize:
-    :param kwargs:
-    :return:
-    """
-    Eval, Details = None, None
-
-    # TODO
-
-    return Eval, Details
-
+from knn import knncl
+from mtrees import usemtreemex, buildtree, evaltree, MTree
 
 class Ensemble:
 
@@ -43,6 +24,24 @@ class Ensemble:
         self.weak_learners = weak_learners
         self.learning_rates = learning_rates
         self.L = L
+
+    def eval(self, X):
+        if self.L is not None:
+            X = X @ self.L.T
+        # extract from ensemble
+        label_length = self.weak_learners[0].shape[1] - 3
+
+        # initialize predictions
+        n = X.shape[0]
+        p = np.zeros((n, label_length))
+
+        # compute predictions from trees
+        for i in range(self.n_wls):
+            p += self.learning_rates[i] * evaltree(X, self.weak_learners[i])
+        return p
+
+    def transform(self, X):
+        return self.eval(X)
 
 
 def findtargetneighbors(X, labels, K, n_classes):
@@ -139,7 +138,7 @@ def lmnnobj(pred, targets_ind, active_ind):  # X, T, I
 
 
 def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no_potential_impo=50,
-            xval=np.array([]), yval=np.array([]), **kwargs):
+            xval=np.array([]), yval=np.array([]), **kwargs) -> Ensemble:
     """
     Nonlinear metric learning using gradient boosting regression trees.
     :param X: (dxn) is the input training data, 'labels' (1xn) the corresponing labels
@@ -161,16 +160,11 @@ def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no
     un, labels = np.unique(Y), Y
     # Check that the labels have the correct format [0, 1, ..., L]
     assert np.alltrue(un == np.arange(len(un)))
-    embedding = None
     n_classes = len(un)
 
+    use_validation = xval is not None
     pred = L @ X
-    if len(xval) != 0:
-        predVAL = L @ xval
-        computevalerr = lambda pred, predVAL: knncl([], pred, Y, predVAL, yval, 1, train=False)
-    else:
-        predVAL = np.array([])
-        computevalerr = lambda pred, predVAL: - 1.0
+    predVAL = L @ xval if use_validation else None
 
     # Initialize some variables
     D, N = X.shape
@@ -185,11 +179,11 @@ def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no
     Xs, Xi = np.sort(X.T, axis=0), np.argsort(X.T, axis=0)
 
     # initialize ensemble (cell array of trees)
-    ensemble = Ensemble()
+    ensemble = Ensemble(L=L)
 
     # initialize the lowest validation error
     lowestval = np.inf
-    embedding = lambda: X
+    embedding = None if use_validation else ensemble
 
     # initialize roll-back in case stepsize is too large
     OC = np.inf
@@ -204,7 +198,9 @@ def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no
             active = findimpostors(pred, labels, n_classes, no_potential_impo)
             OC = np.inf  # allow objective to go up
 
-        hinge, grad = lmnnobj(pred, targets_ind.T.astype(np.int16), active.astype(np.int16))
+        # _, _, _, mat_targets_ind, mat_active = loadmat('data/targets_and_active.mat').values()
+        # mat_targets_ind = mat_targets_ind.T
+        hinge, grad = lmnnobj(pred, targets_ind.T, active)
         C = np.sum(hinge)
         print('--> It {} Loss value ({}) ...'.format(ensemble.n_wls, C))
         if C > OC:  # roll back in case things go wrong
@@ -220,7 +216,7 @@ def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no
             lr *= 1.01
 
         # Perform gradient boosting: construct trees to minimize loss
-        tree, p = buildtree(X.T, Xs, Xi, -grad.T, depth, kwargs)
+        tree, p = buildtree(X.T, Xs, Xi, -grad.T, depth)
 
         # update predictions and ensemble
         Opred = pred
@@ -235,24 +231,21 @@ def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no
         ensemble.weak_learners.append(tree)
         ensemble.learning_rates.append(lr)
 
-        # update embedding of validation data
-        if len(xval) > 0:
-            predVAL = predVAL + lr * evaltree(xval.T, tree).T
-
         # Print out progress
         no_slack = np.sum(hinge > 0)
         if iter % 5 == 0 and verbose:
             print("Iteration {}: loss is {}, violating inputs: {}, learning rate: {}".format(
                 iter, C / N, no_slack, lr))
 
-        if iter % 10 == 0 or iter == (ntrees - 1):
-            ensemble.L = L
-            # TODO Review this code, looks strange
-            newemb = evalensemble(X.T, ensemble, X.T * ensemble.L.T).T
-            valerr = computevalerr(pred, predVAL)
-            if valerr <= lowestval:
-                lowestval = valerr
-                embedding = newemb
-                if verbose and lowestval >= 0.0:
-                    print('Best validation error: {.2f}%'.format(lowestval * 100.0))
+        # update embedding of validation data
+        if use_validation:
+            predVAL = predVAL + lr * evaltree(xval.T, tree).T
+
+            if iter % 10 == 0 or iter == (ntrees - 1):
+                valerr = knncl(None, pred, Y, predVAL, yval, 1, train=False)
+                if valerr <= lowestval:
+                    lowestval = valerr
+                    embedding = deepcopy(ensemble)
+                    if verbose and lowestval >= 0.0:
+                        print('Best validation error: {.2f}%'.format(lowestval * 100.0))
     return embedding

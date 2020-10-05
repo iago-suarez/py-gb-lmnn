@@ -413,16 +413,33 @@ def usemtreemex(xtest, xtrain, tree, k):
 
 def getlayer(tree, depth):
     # Tree implementation with arrays
-    # TODO Ensure that this is valid for the 0...N-1 numpy indexing
     maxdepth = np.log2(tree.shape[0] + 1)
     rowindices = np.arange(2 ** (depth - 1) - 1, 2 ** depth - 1)
     layer = tree[rowindices]
-    return layer, rowindices, maxdepth
+    return layer, rowindices, int(maxdepth)
 
 
 def evaltree(X, tree):
-    p = None
-    # TODO
+    # start at root node
+    n = np.zeros(X.shape[0], dtype=int)
+    # update nodes by descending tree
+    _, _, maxdepth = getlayer(tree, 1)
+    for d in range(maxdepth - 1):
+        layer = getlayer(tree, d + 1)[0]
+        bestfeatures = layer[:, 0].astype(int)
+        Fv = bestfeatures[n]
+        bestsplits = layer[:, 1]
+        Sv = bestsplits[n]
+        # Fv(n) = Feature Index,  Vv(n) = Feature Value, Sv(n) = Split Value
+        Iv = np.ravel_multi_index([np.arange(len(X)), Fv], X.shape)
+        Vv = np.take(X, Iv)
+        nNotInLeaf = tree[2 ** d - 1 + n, 2] < 10 ** 30
+        n[nNotInLeaf] = (2 * (n + 1)[nNotInLeaf] - (Vv[nNotInLeaf] < Sv[nNotInLeaf])) - 1
+
+    # determine predictions from leaf labels
+    leafnodes, _, _ = getlayer(tree, maxdepth)  # Stores the last Layer of tree into leafnodes
+    outputlabels = leafnodes[:, 3:]  # Stores the predictions of the leafnodes into outputlabels
+    p = outputlabels[n]  # Stores the prediction for each instance into p
     return p
 
 
@@ -487,7 +504,7 @@ def buildtree(X, Xs, Xi, y, depth, featurecosts=None):
         best_indices = np.ravel_multi_index([bestfeatures, np.arange(len(bestfeatures))], impurity.shape)
         if len(best_indices) == 1:
             best_indices = best_indices[0]
-        bestimpurity, bestsplits = np.take(impurity, best_indices),  np.take(splits, best_indices)
+        bestimpurity, bestsplits = np.take(impurity, best_indices), np.take(splits, best_indices)
 
         # record splits for parent nodes
         _, pi, _ = getlayer(tree, d + 1)
@@ -513,9 +530,3 @@ def buildtree(X, Xs, Xi, y, depth, featurecosts=None):
     p = outputlabels[n]  # Stores the prediction for each instance into p
 
     return tree, p
-
-
-def evalensemble(X, ensemble, p):
-    p = None
-    # TODO
-    return p

@@ -5,7 +5,7 @@ from scipy.io import loadmat
 
 from gb_lmnn import lmnnobj
 from main import knnclassifytreeomp
-from mtrees import MTree, buildtree, buildlayer_sqrimpurity
+from mtrees import MTree, buildtree, buildlayer_sqrimpurity, evaltree
 import numpy as np
 
 
@@ -74,7 +74,7 @@ class TestTreeInfo(TestCase):
         expected_tree[expected_tree[:, 1] == 0, 1] = -1
         expected_tree[expected_tree[:, 2] == 0, 2] = -1
         expected_tree[4, 1] = 0.0
-        
+
         tree, p = buildtree(X, Xs, Xi - 1, y, int(depth))
         tree[tree == np.inf] = sys.float_info.max
         tree[tree == -np.inf] = -sys.float_info.max
@@ -121,3 +121,10 @@ class TestTreeInfo(TestCase):
         self.assertTrue(np.allclose(expected_splits, splits))
         self.assertTrue(np.allclose(expected_impurity, impurity))
         self.assertTrue(np.allclose(expected_labels, labels))
+
+    def test_evaltree(self):
+        _, _, _, expected_prediction, X, tree = loadmat('../data/evaltree1.mat').values()
+        tree[:, 0] -= 1
+        prediction = evaltree(X, tree)
+
+        self.assertTrue(np.allclose(expected_prediction, prediction))
