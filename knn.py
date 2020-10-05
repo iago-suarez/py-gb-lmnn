@@ -31,7 +31,7 @@ def LSKnn2(Ni, KK, MM):
     return yy
 
 
-def knncl(L, xTr, lTr, xTe, lTe, KK, train=True, test=True, cosigndist=0, blocksize=700, **kwargs):
+def knncl(L, xTr, lTr, xTe, lTe, KK, train=True, test=True):
     """
 
     :param L: transformation matrix (learned by LMNN)

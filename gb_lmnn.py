@@ -10,6 +10,7 @@ from tqdm import tqdm
 from knn import knncl
 from mtrees import usemtreemex, buildtree, evaltree, MTree
 
+
 class Ensemble:
 
     @property
@@ -125,6 +126,8 @@ def lmnnobj(pred, targets_ind, active_ind):  # X, T, I
     :param active_ind: Array of integers with shape (N_IMPOSTORS, n_samples). Impostor indices.
     :return: The evaluation of the loss and its gradient
     """
+    assert pred.ndim == 2 and targets_ind.ndim == 2 and active_ind.ndim == 2
+    assert pred.shape[1] == targets_ind.shape[1] == active_ind.shape[1]
     n_dims, n_samples = pred.shape
     hinge, grad = np.zeros(n_samples), np.zeros((n_dims, n_samples))
     kt = targets_ind.shape[0]  # number of target neighbors
@@ -242,10 +245,10 @@ def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no
             predVAL = predVAL + lr * evaltree(xval.T, tree).T
 
             if iter % 10 == 0 or iter == (ntrees - 1):
-                valerr = knncl(None, pred, Y, predVAL, yval, 1, train=False)
+                valerr = float(knncl([], pred, Y, predVAL, yval, 1, train=False)[0])
                 if valerr <= lowestval:
                     lowestval = valerr
                     embedding = deepcopy(ensemble)
                     if verbose and lowestval >= 0.0:
-                        print('Best validation error: {.2f}%'.format(lowestval * 100.0))
+                        print('----> Best validation error: {:.2f}%'.format(lowestval * 100.0))
     return embedding
