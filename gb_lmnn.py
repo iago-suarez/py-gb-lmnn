@@ -1,14 +1,12 @@
 # Iago Suarez implementation of Non-linear Metric Learning
-import collections
 from copy import deepcopy
 
 import numpy as np
-import scipy
 from scipy.spatial.distance import cdist
-from tqdm import tqdm
+from sklearn.neighbors._ball_tree import BallTree
+from sklearn.tree import DecisionTreeRegressor
 
-from knn import knncl
-from mtrees import usemtreemex, buildtree, evaltree, MTree
+from knn import eval_knn
 
 
 class Ensemble:
@@ -27,53 +25,58 @@ class Ensemble:
         self.L = L
 
     def eval(self, X):
-        if self.L is not None:
-            X = X @ self.L.T
+        return self.transform(X)
+
+    def transform(self, X):
+        assert len(self.weak_learners) > 0, "Error: The model hasn't been trained"
+
         # extract from ensemble
-        label_length = self.weak_learners[0].shape[1] - 3
+        label_length = self.weak_learners[0].n_outputs_
 
         # initialize predictions
         n = X.shape[0]
-        p = np.zeros((n, label_length))
+        if self.L is None:
+            p = np.zeros((n, label_length))
+        else:
+            p = X @ self.L.T
 
         # compute predictions from trees
         for i in range(self.n_wls):
-            p += self.learning_rates[i] * evaltree(X, self.weak_learners[i])
+            p += self.learning_rates[i] * self.weak_learners[i].predict(X)
         return p
-
-    def transform(self, X):
-        return self.eval(X)
 
 
 def findtargetneighbors(X, labels, K, n_classes):
-    D, N = X.shape
+    X = X.T
+    N, D = X.shape
     targets_ind = np.zeros((N, K), dtype=int)
     for i in range(n_classes):
         jj, = np.where(labels == i)
         # Samples of the class i
-        Xu = X[:, jj]
-        T = MTree.build(Xu, 50)
-        # Array of shape (4, len(Xu))
-        targets, _ = usemtreemex(Xu, Xu, T, K + 1)
-        targets_ind[jj] = jj[targets[1:]].T
+        Xu = X[jj]
+        kdt = BallTree(Xu, leaf_size=50, metric='euclidean')
+        targets = kdt.query(Xu, k=K + 1, return_distance=False)
+        targets_ind[jj] = jj[targets[:, 1:]]
 
     return targets_ind
 
 
 def findimpostors(pred, labels, n_classes, no_potential_impo):
-    print("  --> Finding impostors...")
-    N = pred.shape[-1]
-    active = np.zeros((no_potential_impo, N), dtype=int)
-    for i in tqdm(range(n_classes)):
+    print("  -->\t Finding impostors...")
+    pred = pred.T
+    N = len(pred)
+    active = np.zeros((N, no_potential_impo), dtype=int)
+    for i in range(n_classes):
         ii, = np.where(labels == i)
-        pi = pred[:, ii]
+        pi = pred[ii]
         jj, = np.where(labels != i)
-        pj = pred[:, jj]
-        # Use a tree Tj to search in hard negatives of class i
-        Tj = MTree.build(pj, 50)
-        active[:, ii] = jj[usemtreemex(pi, pj, Tj, no_potential_impo)[0]]
+        pj = pred[jj]
+        # Find the nearest neighbors using a BallTree
+        kdt = BallTree(pj, leaf_size=50, metric='euclidean')
+        hardest_examples = kdt.query(pi, k=no_potential_impo, return_distance=False)
+        active[ii] = jj[hardest_examples]
 
-    return active
+    return active.T
 
 
 def computeloss(X, T, I, kt, i, grad):
@@ -90,12 +93,12 @@ def computeloss(X, T, I, kt, i, grad):
     lossI = np.maximum(0, 1 + dt[:, np.newaxis] - dists).sum()
     #  compute distances to impostors
     for k, dis in enumerate(dists):  # For each impostor
-        for t in range(kt):
+        for j in range(kt):  # For each target neighbor
             # For each target neighbor
-            if dt[t] > dis - 1:
-                # Update gradient
-                grad[i] -= X[T[t]] - X[I[k]]
-                grad[T[t]] -= X[i] - X[T[t]]
+            if dt[j] > dis - 1:
+                # TODO Understand: Update gradient
+                grad[i] -= X[T[j]] - X[I[k]]
+                grad[T[j]] -= X[i] - X[T[j]]
                 grad[I[k]] += X[i] - X[I[k]]
 
     return 0.5 * (lossT + lossI)
@@ -156,6 +159,10 @@ def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no
     use_validation = xval is not None
     pred = L @ X
     predVAL = L @ xval if use_validation else None
+    eye = np.eye(pred.shape[0])
+    if use_validation:
+        valerr = eval_knn(pred.T, Y, eye, predVAL.T, yval.flatten(), k=1)
+        print("--> Initial validation error: {:.2f}%".format(100 * valerr))
 
     # Initialize some variables
     D, N = X.shape
@@ -166,8 +173,6 @@ def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no
 
     # sort the training input feature-wise (column-wise)
     N = X.shape[1]
-    #  sorts each column of x.T in ascending order.
-    Xs, Xi = np.sort(X.T, axis=0), np.argsort(X.T, axis=0)
 
     # initialize ensemble (cell array of trees)
     ensemble = Ensemble(L=L)
@@ -189,25 +194,24 @@ def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no
             active = findimpostors(pred, labels, n_classes, no_potential_impo)
             OC = np.inf  # allow objective to go up
 
-        # _, _, _, mat_targets_ind, mat_active = loadmat('data/targets_and_active.mat').values()
-        # mat_targets_ind = mat_targets_ind.T
         hinge, grad = lmnnobj(pred, targets_ind.T, active)
         C = np.sum(hinge)
-        print('--> It {} Loss value ({}) ...'.format(ensemble.n_wls, C))
         if C > OC:  # roll back in case things go wrong
             C = OC
             pred = Opred
             predVAL = OpredVAL
             # remove from ensemble
             ensemble.weak_learners.pop(), ensemble.learning_rates.pop()
-            print('Learing rate too large ({}) ...'.format(lr))
+            print('-->\t Learning rate too large ({}) ...'.format(lr))
             lr /= 2.0
         else:
             # Otherwise increase learning rate a little
             lr *= 1.01
 
-        # Perform gradient boosting: construct trees to minimize loss
-        tree, p = buildtree(X.T, Xs, Xi, -grad.T, depth)
+        tree = DecisionTreeRegressor(max_depth=depth)
+        tree.fit(X.T, -grad.T)
+        p = tree.predict(X.T)
+        print("-->\t Quality of gradient approximation: {}".format(np.sum((- grad.T - p) ** 2) / len(p)))
 
         # update predictions and ensemble
         Opred = pred
@@ -224,16 +228,16 @@ def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no
 
         # Print out progress
         no_slack = np.sum(hinge > 0)
-        if iter % 5 == 0 and verbose:
-            print("Iteration {}: loss is {}, violating inputs: {}, learning rate: {}".format(
-                iter, C / N, no_slack, lr))
+        print("--> Iteration {}: loss is {}, violating inputs: {}, learning rate: {:.6f}".format(
+            iter, C / N, no_slack, lr))
 
         # update embedding of validation data
         if use_validation:
-            predVAL = predVAL + lr * evaltree(xval.T, tree).T
+            predVAL = predVAL + lr * tree.predict(xval.T).T
 
             if iter % 10 == 0 or iter == (ntrees - 1):
-                valerr = float(knncl([], pred, Y, predVAL, yval, 1, train=False)[0])
+                eye = np.eye(pred.shape[0])
+                valerr = eval_knn(pred.T, Y, eye, predVAL.T, yval.flatten(), k=1)
                 if valerr <= lowestval:
                     lowestval = valerr
                     embedding = deepcopy(ensemble)

@@ -2,9 +2,10 @@ import sys
 from unittest import TestCase
 
 from scipy.io import loadmat
+from sklearn.tree import DecisionTreeRegressor
 
-from gb_lmnn import lmnnobj, knncl
-from main import knnclassifytreeomp
+from gb_lmnn import lmnnobj, findimpostors
+from main import knn_classify_balltree
 from mtrees import MTree, buildtree, buildlayer_sqrimpurity, evaltree
 import numpy as np
 
@@ -33,12 +34,17 @@ class TestTreeInfo(TestCase):
         _, _, _, xTe, xTr, xVa, yTr, yTe, yVa = loadmat('../data/segment.mat').values()
         _, _, _, index, piv, radius, jumpindex, kids = loadmat('../data/my_tree.mat').values()
         n_nodes = len(radius.flatten())
-        tree = MTree(index.flatten() - 1, piv, radius.flatten(), jumpindex - 1, kids - 1, n_nodes, 15)
         yTr, yTe = yTr.astype(int).flatten(), yTe.astype(int).flatten()
-        eval, details, _ = knnclassifytreeomp([], xTr, yTr, xTe, yTe, 1, tree=tree)
+        eval, details = knn_classify_balltree([], xTr.T, yTr, xTe.T, yTe, 1)
         expected_eval = np.array([[0.04473304], [0.04112554]])
         print(f"1-NN Error: {100 * eval[1][0]}%")
         self.assertTrue(np.allclose(expected_eval, eval))
+
+    def test_findimpostors(self):
+        data = loadmat('../data/findimpostors.mat')
+        labels, pred, expected_impostors = data['labels'], data['pred'], data['active']
+        impostors = findimpostors(pred, labels.flatten() - 1, 7, 50)
+        self.assertTrue(np.allclose(expected_impostors - 1, impostors))
 
     def test_usemtreemex(self):
         xtrain, xtest, k, piv, radius, jumpindex, kids = \
@@ -128,14 +134,7 @@ class TestTreeInfo(TestCase):
 
         self.assertTrue(np.allclose(expected_prediction, prediction))
 
-    def test_knncl(self):
-        _, _, _, xTr, lTr, xTe, lTe, KK, varargin, expected_eval, expected_details = \
-            loadmat('../data/knncl.mat').values()
-
-        eval, details = knncl([], xTr, lTr.flatten(), xTe, lTe.flatten(), int(KK), train=False)
-        self.assertAlmostEqual(float(expected_eval), eval)
-
-    def test_experiment_fig2(self):
+    def test_experiment_sklearn_tree_fig2(self):
         import matplotlib.pyplot as plt
 
         n_samples_per_lbl = 50
@@ -165,8 +164,9 @@ class TestTreeInfo(TestCase):
         for i in range(300):
             hinge, grad = lmnnobj(X, targets, impostors)
 
-            Xs, Xi = np.sort(X.T, axis=0), np.argsort(X.T, axis=0)
-            tree, p = buildtree(X.T, Xs, Xi, -grad.T, 4)
+            tree = DecisionTreeRegressor(max_depth=4)
+            tree.fit(X.T, -grad.T)
+            p = tree.predict(X.T)
             p = p.T
 
             if i % 10 == 0:

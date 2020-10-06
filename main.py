@@ -6,20 +6,12 @@ from scipy.io import loadmat
 from sklearn.decomposition import PCA
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
 from sklearn.neighbors import KNeighborsClassifier
+from sklearn.neighbors._ball_tree import BallTree
 from sklearn.pipeline import Pipeline
 
 from gb_lmnn import gb_lmnn
-from knn import LSKnn2
+from knn import LSKnn2, eval_knn
 from mtrees import MTree
-
-
-def findknnmtreeomp(x, testx, k):
-    iknn, dists = None, None
-    return iknn, dists
-
-
-def usemtreemexomp(xtest, xtrain, tree, k):
-    return tree.findknn(xtrain, xtest, k)
 
 
 def pca(X, whiten=False):
@@ -43,7 +35,7 @@ def pca(X, whiten=False):
     return evects, evals
 
 
-def knnclassifytreeomp(L, xTr, lTr, xTe, lTe, KK, tree=None, treesize=15, train=True, **kwargs):
+def knn_classify_balltree(L, xTr, lTr, xTe, lTe, KK, tree=None, treesize=15, train=True, **kwargs):
     """
 
     :param L: linear transformation
@@ -59,41 +51,36 @@ def knnclassifytreeomp(L, xTr, lTr, xTe, lTe, KK, tree=None, treesize=15, train=
         - 'train',1  (0 means no training error)
     """
     assert lTr.ndim == 1, lTe.ndim == 1
-    assert xTr.shape[1] == len(lTr)
-    assert xTe.shape[1] == len(lTe)
+    assert xTr.shape[0] == len(lTr)
+    assert xTe.shape[0] == len(lTe)
 
     if len(L) != 0:
         # L is the initial linear projection, for example PCa or LDA
-        xTr = L @ xTr
-        xTe = L @ xTe
+        xTr = xTr @ L.T
+        xTe = xTe @ L.T
 
     if tree is None:
         print('Building tree ...')
-        tree = MTree.build(xTr, treesize)
+        tree = BallTree(xTr, leaf_size=treesize, metric='euclidean')
+    else:
+        assert isinstance(tree, BallTree)
 
     MM = np.append(lTr, lTe).min()
     Kn = np.max(KK)
     assert np.alltrue(KK > 0)
 
-    NTr = xTr.shape[1]
-    NTe = xTe.shape[1]
-
-    if xTr.shape[0] != xTe.shape[0]:
+    NTr, NTe = xTr.shape[0], xTe.shape[0]
+    if xTr.shape[1] != xTe.shape[1]:
         raise ValueError('PROBLEM: Please make sure that training inputs and test inputs have the same dimensions!'
                          'xTr.shape: {}, xTe.shape: {}'.format(xTr.shape, xTe.shape))
-
-    if tree.jumpindex.max() != (NTr - 1):
-        raise ValueError('PROBLEM: Tree does not seem to belong to training data! '
-                         'Max index of tree: ' + str(kwargs['tree'].jumpindex.max()) +
-                         ' Length of training data: ' + str(NTr))
 
     print("Evaluating...")
     Eval = np.zeros((2, KK))
     # Use the tree to compute the distance between the testing and training points
     # iTe: indices of the testing elements in the training set
-    iTe, dists = usemtreemexomp(xTe, xTr, tree, Kn)
-    assert iTe.ndim == 2 and iTe.shape == (1, NTe)
-    assert dists.ndim == 2 and dists.shape == (1, NTe)
+    dists, iTe = tree.query(xTe, k=Kn, return_distance=True)
+    assert iTe.ndim == 2 and iTe.shape == (NTe, 1)
+    assert dists.ndim == 2 and dists.shape == (NTe, 1)
 
     # Labels of the testing elements in the training set
     lTe2 = LSKnn2(lTr[iTe], KK, MM)
@@ -103,8 +90,8 @@ def knnclassifytreeomp(L, xTr, lTr, xTe, lTe, KK, tree=None, treesize=15, train=
     Details = {}
     if train:
         # Use the tree to compute the distance between the training points
-        iTr, dists = usemtreemexomp(xTr, xTr, tree, Kn + 1)
-        iTr = iTr[1:]
+        dists, iTr = tree.query(xTr, k=Kn + 1, return_distance=True)
+        iTr = iTr[:, 1:]
         lTr2 = LSKnn2(lTr[iTr], KK, MM)
         Eval[0, :] = np.sum(lTr2 != np.repeat(lTr, KK, axis=0), axis=1) / NTr
 
@@ -115,15 +102,7 @@ def knnclassifytreeomp(L, xTr, lTr, xTe, lTe, KK, tree=None, treesize=15, train=
 
     Details['lTe2'] = lTe2
     Details['iTe'] = iTe
-    # Eval = Eval[:, outputK]
-    return Eval, Details, tree
-
-
-def eval_knn(X_tr, y_tr, L, X_te, y_te, k=3):
-    assert len(X_tr) == len(y_tr) and len(X_te) == len(y_te)
-    assert L.shape[0] == X_tr.shape[1] and L.shape[0] == X_te.shape[1]
-    kNN = KNeighborsClassifier(n_neighbors=k).fit(X_tr @ L, y_tr)
-    return np.mean(kNN.predict(X_te @ L) != y_te)
+    return Eval, Details
 
 
 # #####################################################################################3
@@ -136,13 +115,13 @@ def main():
     # Load variables
     print("--> Loading data")
     _, _, _, xTe, xTr, xVa, yTr, yTe, yVa = loadmat('data/segment.mat').values()
-    yTr, yTe = yTr.flatten().astype(int) - 1, yTe.flatten().astype(int) - 1
-    err, _, _ = knnclassifytreeomp([], xTr, yTr, xTe, yTe, 1)
+    yTr, yTe, yVa = yTr.flatten().astype(int) - 1, yTe.flatten().astype(int) - 1, yVa.flatten().astype(int) - 1
+    err, _ = knn_classify_balltree([], xTr.T, yTr, xTe.T, yTe, 1)
 
     print("--> Training pca...")
     L0 = pca(xTr)[0].T
     # L0 = pca(xTr, whiten=True)[0].T
-    err, _, _ = knnclassifytreeomp(L0[0:3], xTr, yTr, xTe, yTe, 1)
+    err, _ = knn_classify_balltree(L0[0:3], xTr.T, yTr, xTe.T, yTe, 1)
     print('1-NN Error after PCA in 3d is : {}%'.format(100 * err[1]))
 
     fig = plt.figure(figsize=plt.figaspect(1))
@@ -171,11 +150,11 @@ def main():
     # Gradient boosting
     print('Learning nonlinear metric with GB-LMNN ... ')
     L = pcalda_mat
-    _, _, _, L = loadmat('data/lmnn2_L.mat').values()
+    L = loadmat('data/lmnn2_L.mat')['L']
     embed = gb_lmnn(xTr, yTr, 3, L, ntrees=200, verbose=True, xval=xVa, yval=yVa)
 
     # KNN classification error after metric learning using gbLMNN
-    err, Details, _ = knnclassifytreeomp([], embed.transform(xTr), yTr, embed.transform(xTe), yTe, 1)
+    err, Details = knn_classify_balltree([], embed.transform(xTr.T), yTr, embed.transform(xTe.T), yTe, 1)
     print('GB-LMNN Training Error: {:.2f}%, Test (Error: {:.2f}%'.format(100 * err[0, 0], 100 * err[1, 0]))
 
     # # ################################ k-NN evaluation ###################################
