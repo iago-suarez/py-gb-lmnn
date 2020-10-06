@@ -11,7 +11,6 @@ from sklearn.pipeline import Pipeline
 
 from gb_lmnn import gb_lmnn
 from knn import LSKnn2, eval_knn
-from mtrees import MTree
 
 
 def pca(X, whiten=False):
@@ -119,10 +118,49 @@ def main():
     err, _ = knn_classify_balltree([], xTr.T, yTr, xTe.T, yTe, 1)
 
     print("--> Training pca...")
-    L0 = pca(xTr)[0].T
-    # L0 = pca(xTr, whiten=True)[0].T
+    L0 = pca(xTr, whiten=True)[0].T
     err, _ = knn_classify_balltree(L0[0:3], xTr.T, yTr, xTe.T, yTe, 1)
     print('1-NN Error after PCA in 3d is : {}%'.format(100 * err[1]))
+
+    print("--> Training pca-lda...")
+    pca_lda = Pipeline([('pca', PCA(n_components=5, whiten=True)),
+                        ('lda', LinearDiscriminantAnalysis(n_components=3))])
+    pca_lda.fit(xTr.T, yTr.flatten())
+    pca_eigen_vals = np.diag(1 / np.sqrt(pca_lda[0].explained_variance_))
+    pcalda_mat = pca_lda[1].scalings_[:, :3].T @ pca_eigen_vals @ pca_lda[0].components_
+
+    print("--> Training lmnn...")
+    lmnn = LMNN(init='pca', k=7, learn_rate=1e-6, verbose=False, n_components=3, max_iter=1000)
+    lmnn.fit(xTr.T, yTr.flatten())
+
+    print('Learning nonlinear metric with GB-LMNN ... ')
+    L = pcalda_mat
+    L = loadmat('data/lmnn2_L.mat')['L']  # Load the matlab matrix
+    embed = gb_lmnn(xTr, yTr, 3, L, ntrees=200, verbose=True, xval=xVa, yval=yVa)
+    # KNN classification error after metric learning using gbLMNN
+    err, Details = knn_classify_balltree([], embed.transform(xTr.T), yTr, embed.transform(xTe.T), yTe, 1)
+    print('GB-LMNN Training Error: {:.2f}%, Test (Error: {:.2f}%'.format(100 * err[0, 0], 100 * err[1, 0]))
+
+    # ################################ k-NN evaluation ###################################
+    print("\n--> Evaluation:")
+    k = 1
+    te_err = eval_knn(xTr.T, yTr.flatten(), np.eye(len(xTr)), xTe.T, yTe.flatten(), k)
+    print('--> 1-NN Error for raw (high dimensional) input is : {:.2f}%'.format(100 * te_err))
+
+    te_err = eval_knn(xTr.T, yTr.flatten(), L0[0:3].T, xTe.T, yTe.flatten(), k)
+    print('--> 1-NN Error for PCA is : {:.2f}%'.format(100 * te_err))
+
+    te_err = eval_knn(xTr.T, yTr.flatten(), pcalda_mat.T, xTe.T, yTe.flatten(), 1)
+    print('--> 1-NN Error for PCA-LDA input is : {:.2f}%'.format(100 * te_err))
+
+    te_err = eval_knn(xTr.T, yTr.flatten(), lmnn.components_[0:3].T, xTe.T, yTe.flatten(), k)
+    print('--> 1-NN Error for LMNN is : {:.2f}%'.format(100 * te_err))
+
+    te_err = eval_knn(embed.transform(xTr.T), yTr.flatten(), np.eye(3), embed.transform(xTe.T), yTe.flatten(), 1)
+    print('--> 1-NN Error for GB-LMNN input is : {:.2f}%'.format(100 * te_err))
+
+    # ################################ 3-D Plot ###################################
+    print("\n--> Plotting figures")
 
     fig = plt.figure(figsize=plt.figaspect(1))
     ax1 = fig.add_subplot(2, 2, 1, projection='3d')
@@ -134,66 +172,30 @@ def main():
         ax1.scatter(pts_to_plt[0, mask], pts_to_plt[1, mask], pts_to_plt[2, mask], label=l)
     plt.legend()
 
-    print("--> Training pca-lda...")
-    pca_lda = Pipeline([('pca', PCA(n_components=5, whiten=True)),
-                        ('lda', LinearDiscriminantAnalysis(n_components=3))])
-    pca_lda.fit(xTr.T, yTr.flatten())
-    pcalda_mat = pca_lda[1].scalings_[:, :3].T @ np.diag(1 / np.sqrt(pca_lda[0].explained_variance_)) @ pca_lda[
-        0].components_
-    te_err = eval_knn((pcalda_mat @ xTr).T, yTr.flatten(), np.eye(3), (pcalda_mat @ xTe).T, yTe.flatten(), 1)
-    print('--> 1-NN Error for PCA-LDA input is : {}%'.format(100 * te_err))
+    ax2 = fig.add_subplot(2, 2, 2, projection='3d')
+    ax2.set_title("PCA-LDA")
+    pts_to_plt = pcalda_mat @ xTr
 
-    # print("--> Training lmnn...")
-    # lmnn = LMNN(init='pca', k=7, learn_rate=1e-6, verbose=False, n_components=3, max_iter=1000)
-    # lmnn.fit(xTr.T, yTr.flatten())
+    for l in np.unique(yTr):
+        mask = np.squeeze(yTr == l)
+        ax2.scatter(pts_to_plt[0, mask], pts_to_plt[1, mask], pts_to_plt[2, mask], label=l)
+    plt.legend()
 
-    # Gradient boosting
-    print('Learning nonlinear metric with GB-LMNN ... ')
-    L = pcalda_mat
-    L = loadmat('data/lmnn2_L.mat')['L']
-    embed = gb_lmnn(xTr, yTr, 3, L, ntrees=200, verbose=True, xval=xVa, yval=yVa)
+    ax3 = fig.add_subplot(2, 2, 3, projection='3d')
+    ax3.set_title("LMNN")
+    pts_to_plt = lmnn.transform(xTr.T).T
+    for l in np.unique(yTr):
+        mask = np.squeeze(yTr == l)
+        ax3.scatter(pts_to_plt[0, mask], pts_to_plt[1, mask], pts_to_plt[2, mask], label=l)
+    plt.legend()
 
-    # KNN classification error after metric learning using gbLMNN
-    err, Details = knn_classify_balltree([], embed.transform(xTr.T), yTr, embed.transform(xTe.T), yTe, 1)
-    print('GB-LMNN Training Error: {:.2f}%, Test (Error: {:.2f}%'.format(100 * err[0, 0], 100 * err[1, 0]))
-
-    # # ################################ k-NN evaluation ###################################
-    # print("\n--> Evaluation:")
-    # k = 1
-    # te_err = eval_knn(xTr.T, yTr.flatten(), np.eye(len(xTr)), xTe.T, yTe.flatten(), k)
-    # print('--> 1-NN Error for raw (high dimensional) input is : {}%'.format(100 * te_err))
-    #
-    # te_err = eval_knn(xTr.T, yTr.flatten(), L0[0:3].T, xTe.T, yTe.flatten(), k)
-    # print('--> 1-NN Error for PCA is : {}%'.format(100 * te_err))
-    #
-    # te_err = eval_knn(lda_xtr, yTr.flatten(), np.eye(3), lda_xte, yTe.flatten(), k)
-    # print('--> 1-NN Error for PCA-LDA input is : {}%'.format(100 * te_err))
-    #
-    # te_err = eval_knn(xTr.T, yTr.flatten(), lmnn.components_[0:3].T, xTe.T, yTe.flatten(), k)
-    # print('--> 1-NN Error for LMNN is : {}%'.format(100 * te_err))
-    #
-    # # ################################ 3-D Plot ###################################
-    # print("\n--> Plotting figures")
-    #
-    # ax2 = fig.add_subplot(2, 2, 2, projection='3d')
-    # ax2.set_title("PCA-LDA")
-    # pts_to_plt = lda_xtr.T
-    #
-    # for l in np.unique(yTr):
-    #     mask = np.squeeze(yTr == l)
-    #     ax2.scatter(pts_to_plt[0, mask], pts_to_plt[1, mask], pts_to_plt[2, mask], label=l)
-    # plt.legend()
-    #
-    # ax3 = fig.add_subplot(2, 2, 3, projection='3d')
-    # ax3.set_title("LMNN")
-    # pts_to_plt = lmnn.transform(xTr.T).T
-    # for l in np.unique(yTr):
-    #     mask = np.squeeze(yTr == l)
-    #     ax3.scatter(pts_to_plt[0, mask], pts_to_plt[1, mask], pts_to_plt[2, mask], label=l)
-    # plt.legend()
-    #
-    # ax4 = fig.add_subplot(2, 2, 4, projection='3d')
-    # ax4.set_title("GB-LMNN")
+    ax4 = fig.add_subplot(2, 2, 4, projection='3d')
+    ax4.set_title("GB-LMNN")
+    pts_to_plt = embed.transform(xTr.T).T
+    for l in np.unique(yTr):
+        mask = np.squeeze(yTr == l)
+        ax4.scatter(pts_to_plt[0, mask], pts_to_plt[1, mask], pts_to_plt[2, mask], label=l)
+    plt.legend()
 
     plt.show()
 

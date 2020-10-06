@@ -46,7 +46,7 @@ class Ensemble:
         return p
 
 
-def findtargetneighbors(X, labels, K, n_classes):
+def find_target_neighbors(X, labels, K, n_classes):
     X = X.T
     N, D = X.shape
     targets_ind = np.zeros((N, K), dtype=int)
@@ -61,8 +61,7 @@ def findtargetneighbors(X, labels, K, n_classes):
     return targets_ind
 
 
-def findimpostors(pred, labels, n_classes, no_potential_impo):
-    print("  -->\t Finding impostors...")
+def find_impostors(pred, labels, n_classes, no_potential_impo):
     pred = pred.T
     N = len(pred)
     active = np.zeros((N, no_potential_impo), dtype=int)
@@ -79,7 +78,7 @@ def findimpostors(pred, labels, n_classes, no_potential_impo):
     return active.T
 
 
-def computeloss(X, T, I, kt, i, grad):
+def compute_loss(X, T, I, kt, i, grad):
     # TODO This uses a fixed margin of 1, this should be parametrized depending of the problem!
     # compute distances to target neighbors
     dt = cdist(X[i, np.newaxis], X[T], 'sqeuclidean').flatten()
@@ -104,7 +103,7 @@ def computeloss(X, T, I, kt, i, grad):
     return 0.5 * (lossT + lossI)
 
 
-def lmnnobj(pred, targets_ind, active_ind):  # X, T, I
+def lmnn_obj_loss(pred, targets_ind, active_ind):  # X, T, I
     """
     Computes the hinge loss and its gradient for the formula (8) of Non-linear Metric Learning:
     .. math::
@@ -126,7 +125,7 @@ def lmnnobj(pred, targets_ind, active_ind):  # X, T, I
     hinge, grad = np.zeros(n_samples), np.zeros(pred.shape)
     kt = targets_ind.shape[0]  # number of target neighbors
     for i in range(n_samples):
-        hinge[i] = computeloss(pred, targets_ind[:, i], active_ind[:, i], kt, i, grad)
+        hinge[i] = compute_loss(pred, targets_ind[:, i], active_ind[:, i], kt, i, grad)
 
     return hinge, grad.T
 
@@ -158,10 +157,10 @@ def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no
 
     use_validation = xval is not None
     pred = L @ X
-    predVAL = L @ xval if use_validation else None
+    pred_val = L @ xval if use_validation else None
     eye = np.eye(pred.shape[0])
     if use_validation:
-        valerr = eval_knn(pred.T, Y, eye, predVAL.T, yval.flatten(), k=1)
+        valerr = eval_knn(pred.T, Y, eye, pred_val.T, yval.flatten(), k=1)
         print("--> Initial validation error: {:.2f}%".format(100 * valerr))
 
     # Initialize some variables
@@ -169,7 +168,7 @@ def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no
     assert (len(labels) == N)
 
     # find K target neighbors
-    targets_ind = findtargetneighbors(X, labels, K, n_classes)
+    targets_ind = find_target_neighbors(X, labels, K, n_classes)
 
     # sort the training input feature-wise (column-wise)
     N = X.shape[1]
@@ -179,27 +178,27 @@ def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no
 
     # initialize the lowest validation error
     lowestval = np.inf
-    embedding = None if use_validation else ensemble
+    best_ensemble = None if use_validation else ensemble
 
     # initialize roll-back in case stepsize is too large
-    OC = np.inf
-    Opred = pred
-    OpredVAL = predVAL
+    last_cost = np.inf
+    last_pred = pred
+    last_pred_val = pred_val
 
     iter = 0
     # Perform main learning iterations
     while ensemble.n_wls < ntrees:
         # Select potential imposters
         if iter % 10 == 0:
-            active = findimpostors(pred, labels, n_classes, no_potential_impo)
-            OC = np.inf  # allow objective to go up
+            active = find_impostors(pred, labels, n_classes, no_potential_impo)
+            last_cost = np.inf  # allow objective to go up
 
-        hinge, grad = lmnnobj(pred, targets_ind.T, active)
-        C = np.sum(hinge)
-        if C > OC:  # roll back in case things go wrong
-            C = OC
-            pred = Opred
-            predVAL = OpredVAL
+        hinge, grad = lmnn_obj_loss(pred, targets_ind.T, active)
+        cost = np.sum(hinge)
+        if cost > last_cost:  # roll back in case things go wrong
+            cost = last_cost
+            pred = last_pred
+            pred_val = last_pred_val
             # remove from ensemble
             ensemble.weak_learners.pop(), ensemble.learning_rates.pop()
             print('-->\t Learning rate too large ({}) ...'.format(lr))
@@ -208,18 +207,16 @@ def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no
             # Otherwise increase learning rate a little
             lr *= 1.01
 
+        # Train the weak learner tree
         tree = DecisionTreeRegressor(max_depth=depth)
         tree.fit(X.T, -grad.T)
-        p = tree.predict(X.T)
-        print("-->\t Quality of gradient approximation: {}".format(np.sum((- grad.T - p) ** 2) / len(p)))
+        wl_pred = tree.predict(X.T)
 
-        # update predictions and ensemble
-        Opred = pred
-        OC = C
-        OpredVAL = predVAL
+        # Record previous values
+        last_pred, last_cost, last_pred_val = pred, cost, pred_val
 
         # Update predictions
-        pred = pred + lr * p.T
+        pred = pred + lr * wl_pred.T
         iter = ensemble.n_wls + 1
 
         # Add the tree and thew learning rate to the ensemble
@@ -228,19 +225,20 @@ def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no
 
         # Print out progress
         no_slack = np.sum(hinge > 0)
-        print("--> Iteration {}: loss is {}, violating inputs: {}, learning rate: {:.6f}".format(
-            iter, C / N, no_slack, lr))
+        if iter % 10 == 0 and verbose:
+            print("--> Iteration {}: loss is {}, violating inputs: {}, learning rate: {:.6f}".format(
+                iter, cost / N, no_slack, lr))
 
-        # update embedding of validation data
+        # update best_ensemble of validation data
         if use_validation:
-            predVAL = predVAL + lr * tree.predict(xval.T).T
+            pred_val = pred_val + lr * tree.predict(xval.T).T
 
             if iter % 10 == 0 or iter == (ntrees - 1):
                 eye = np.eye(pred.shape[0])
-                valerr = eval_knn(pred.T, Y, eye, predVAL.T, yval.flatten(), k=1)
+                valerr = eval_knn(pred.T, Y, eye, pred_val.T, yval.flatten(), k=1)
                 if valerr <= lowestval:
                     lowestval = valerr
-                    embedding = deepcopy(ensemble)
+                    best_ensemble = deepcopy(ensemble)
                     if verbose and lowestval >= 0.0:
                         print('----> Best validation error: {:.2f}%'.format(lowestval * 100.0))
-    return embedding
+    return best_ensemble

@@ -1,16 +1,8 @@
 import numpy as np
-from scipy.spatial.distance import cdist
 from sklearn.neighbors import KNeighborsClassifier
 
 
 def LSKnn2(Ni, KK, MM):
-    """
-    Return a list of classes that TODO
-    :param Ni:
-    :param KK:
-    :param MM:
-    :return:
-    """
     Ni = Ni.T
     N = Ni.shape[1]
     Ni = Ni - MM + 1
