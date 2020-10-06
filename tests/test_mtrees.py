@@ -140,11 +140,13 @@ class TestTreeInfo(TestCase):
 
         n_samples_per_lbl = 50
         initial_dist = 0.01
+        problem_scale = 5
         angles = np.arange(0, 2 * np.pi, 2 * np.pi / n_samples_per_lbl)
         middle_pts = np.array([np.cos(angles), np.sin(angles)])
         class1 = (1 - initial_dist) * middle_pts
         class2 = (1 + initial_dist) * middle_pts
         X = np.hstack([class1, class2])
+        X *= problem_scale
         y = np.array([0] * n_samples_per_lbl + [1] * n_samples_per_lbl)
         mask1 = y == 0
         mask2 = y == 1
@@ -159,8 +161,8 @@ class TestTreeInfo(TestCase):
         I1 = I2 + n_samples_per_lbl
         impostors = np.hstack([I1, I2])
 
-        lr = 0.005
-        for i in range(500):
+        lr = 0.01
+        for i in range(300):
             hinge, grad = lmnnobj(X, targets, impostors)
 
             Xs, Xi = np.sort(X.T, axis=0), np.argsort(X.T, axis=0)

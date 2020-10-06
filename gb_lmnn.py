@@ -76,38 +76,28 @@ def findimpostors(pred, labels, n_classes, no_potential_impo):
     return active
 
 
-# def computeloss(X, & T[i * kt], & I[i * ki], d, kt, ki, i, grad):
-def computeloss(X, T, I, d, kt, ki, i, grad):
-    dt = np.zeros(kt)
-    lossT = 0.0
-    lossI = 0.0
+def computeloss(X, T, I, kt, i, grad):
+    # TODO This uses a fixed margin of 1, this should be parametrized depending of the problem!
     # compute distances to target neighbors
-    for k in range(kt):
-        dt[k] = np.sum((X[:, i] - X[:, T[k]]) ** 2) + 1
-        # print("----------> dt[{}]: {}".format(k, dt[k]))
-        lossT += dt[k] - 1.0
-        # update gradient
-        grad[:, i] += X[:, i] - X[:, T[k]]
-        grad[:, T[k]] -= X[:, i] - X[:, T[k]]
+    dt = cdist(X[i, np.newaxis], X[T], 'sqeuclidean').flatten()
+    lossT = np.sum(dt)
+    # compute the influence of the target neighbors in the gradient
+    grad[i] += np.sum(X[np.newaxis, i] - X[T], axis=0)
+    grad[T] -= X[i] - X[T]
 
-    ma = dt.max()
-    # print("-----------> ma: {}".format(ma))
+    dists = cdist(X[i, np.newaxis], X[I], 'sqeuclidean').flatten()
+    # Hinge loss
+    lossI = np.maximum(0, 1 + dt[:, np.newaxis] - dists).sum()
     #  compute distances to impostors
-    for k in range(ki):
-        dis = min(ma, np.sum((X[:, i] - X[:, I[k]]) ** 2))
-        # print("******> k: {}, dis: {}".format(k, dis))
+    for k, dis in enumerate(dists):  # For each impostor
         for t in range(kt):
-            if dt[t] > dis:
-                lossI += dt[t] - dis
-
+            # For each target neighbor
+            if dt[t] > dis - 1:
                 # Update gradient
-                grad[:, i] -= X[:, T[t]] - X[:, I[k]]
-                grad[:, T[t]] -= X[:, i] - X[:, T[t]]
-                grad[:, I[k]] += X[:, i] - X[:, I[k]]
-                # grad(:,i) = grad(:,i)-mu*(pred(:,targets_i)-pred(:,impos_i(k)));
-                # grad(:,targets_i) = grad(:,targets_i)-mu*(pred(:,i)-pred(:,targets_i));
-                # grad(:,impos_i(k)) = grad(:,impos_i(k))+mu*(pred(:,i)-pred(:,impos_i(k)));
-    # print("----> lossT: {}, lossI: {}".format(lossT, lossI))
+                grad[i] -= X[T[t]] - X[I[k]]
+                grad[T[t]] -= X[i] - X[T[t]]
+                grad[I[k]] += X[i] - X[I[k]]
+
     return 0.5 * (lossT + lossI)
 
 
@@ -128,16 +118,14 @@ def lmnnobj(pred, targets_ind, active_ind):  # X, T, I
     """
     assert pred.ndim == 2 and targets_ind.ndim == 2 and active_ind.ndim == 2
     assert pred.shape[1] == targets_ind.shape[1] == active_ind.shape[1]
-    n_dims, n_samples = pred.shape
-    hinge, grad = np.zeros(n_samples), np.zeros((n_dims, n_samples))
+    pred = pred.T
+    n_samples, n_dims = pred.shape
+    hinge, grad = np.zeros(n_samples), np.zeros(pred.shape)
     kt = targets_ind.shape[0]  # number of target neighbors
-    ki = active_ind.shape[0]  # number of impostors
     for i in range(n_samples):
-        # print("--> i: " + str(i))
-        hinge[i] = computeloss(pred, targets_ind[:, i], active_ind[:, i], n_dims, kt, ki, i, grad)
-        # print("--> hinge: {}, grad: {}".format(hinge[i], grad[:, i]))
+        hinge[i] = computeloss(pred, targets_ind[:, i], active_ind[:, i], kt, i, grad)
 
-    return hinge, grad
+    return hinge, grad.T
 
 
 def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no_potential_impo=50,
