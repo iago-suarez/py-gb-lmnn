@@ -66,8 +66,8 @@ def main():
     lmnn.fit(xTr, yTr)
 
     print('Learning nonlinear metric with GB-LMNN ... ')
-    L = pcalda_mat
-    # L = loadmat('data/lmnn2_L.mat')['L']  # Load the matlab matrix
+    # L = pcalda_mat
+    L = loadmat('data/lmnn2_L.mat')['L']  # Load the matlab matrix
     embed = gb_lmnn(xTr, yTr, 3, L, n_trees=200, verbose=True, xval=xVa, yval=yVa)
 
     # ################################ k-NN evaluation ###################################
