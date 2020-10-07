@@ -9,7 +9,7 @@ from main import knn_error_score
 import numpy as np
 
 
-class TestTreeInfo(TestCase):
+class TestGBLMNN(TestCase):
 
     def test_knnclassifytreeomp(self):
         _, _, _, xTe, xTr, xVa, yTr, yTe, yVa = loadmat('../data/segment.mat').values()

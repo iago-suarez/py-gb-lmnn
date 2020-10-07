@@ -5,10 +5,12 @@ Pythonic implementation of the paper:
 """
 __author__ = "Iago Suarez"
 __email__ = "iago.suarez.canosa@alumnos.upm.es"
+
 from copy import deepcopy
+from time import time
 
 import numpy as np
-from scipy.spatial.distance import cdist
+from scipy.spatial.distance import cdist, pdist, squareform
 from sklearn.neighbors._ball_tree import BallTree
 from sklearn.tree import DecisionTreeRegressor
 
@@ -64,6 +66,25 @@ def find_target_neighbors(X, labels, K, n_classes):
     return targets_ind
 
 
+def find_random_target_neighbors(X, labels, K, n_classes):
+    N, D = X.shape
+    targets_ind = np.zeros((N, K), dtype=int)
+    for i in range(n_classes):
+        jj, = np.where(labels == i)
+        random_targets = np.random.choice(jj, (len(jj), K))
+        # Check if the random selection has some pair i-i
+        colliding_elements = random_targets == jj[:, np.newaxis]
+        n_colliding_elements = colliding_elements.sum()
+        while n_colliding_elements > 0:
+            # If so, replace these values
+            random_targets[colliding_elements] = np.random.choice(jj, n_colliding_elements)
+            colliding_elements = random_targets == jj[:, np.newaxis]
+            n_colliding_elements = colliding_elements.sum()
+        targets_ind[jj] = random_targets
+
+    return targets_ind
+
+
 def find_impostors(pred, labels, n_classes, no_potential_impo):
     N = len(pred)
     active = np.zeros((N, no_potential_impo), dtype=int)
@@ -80,14 +101,13 @@ def find_impostors(pred, labels, n_classes, no_potential_impo):
     return active
 
 
-def compute_loss(X, T, I, i, grad):
-    # TODO This uses a fixed margin of 1, this should be parametrized depending of the problem!
+def compute_loss(X, T, I, i, grad, margin=1.0):
     # compute distances to target neighbors
     targets_distance = cdist(X[i, np.newaxis], X[T], 'sqeuclidean').flatten()
     lossT = np.sum(targets_distance)
     # compute the influence of the target neighbors in the gradient
     grad[i] += np.sum(X[np.newaxis, i] - X[T], axis=0)
-    grad[T] -= X[i] - X[T]
+    grad[T] += X[T] - X[i]
 
     dists = cdist(X[i, np.newaxis], X[I], 'sqeuclidean').flatten()
     # Hinge loss
@@ -95,16 +115,15 @@ def compute_loss(X, T, I, i, grad):
     #  compute distances to impostors
     for k, k_distance in enumerate(dists):  # For each impostor
         for j, j_distance in zip(T, targets_distance):  # For each target neighbor
-            if j_distance > k_distance - 1:
-                # TODO Understand: Update gradient
-                grad[i] -= X[j] - X[I[k]]
-                grad[j] -= X[i] - X[j]
+            if j_distance > k_distance - margin:
+                grad[i] += X[I[k]] - X[j]
+                grad[j] += X[j] - X[i]
                 grad[I[k]] += X[i] - X[I[k]]
 
     return 0.5 * (lossT + lossI)
 
 
-def lmnn_obj_loss(pred, targets_ind, active_ind):  # X, T, I
+def lmnn_obj_loss(pred, targets_ind, active_ind, margin=1.0):
     """
     Computes the hinge loss and its gradient for the formula (8) of Non-linear Metric Learning:
     .. math::
@@ -125,12 +144,60 @@ def lmnn_obj_loss(pred, targets_ind, active_ind):  # X, T, I
     n_samples, n_dims = pred.shape
     hinge, grad = np.zeros(n_samples), np.zeros(pred.shape)
     for i in range(n_samples):
-        hinge[i] = compute_loss(pred, targets_ind[i], active_ind[i], i, grad)
+        hinge[i] = compute_loss(pred, targets_ind[i], active_ind[i], i, grad, margin)
 
     return hinge, grad
 
 
-def gb_lmnn(X, y, k, L, tol=1e-3, verbose=True, depth=4, n_trees=200, lr=1e-3, no_potential_impo=50,
+def hinge_loss(X, target_ind, impostor_ind, mu=1.0, margin=1.0):
+    n_samples, n_dims = X.shape
+    hinge = np.zeros(n_samples)
+
+    dists = squareform(pdist(X, 'sqeuclidean'))
+    all_target_dist = np.take_along_axis(dists, target_ind, axis=1)
+    all_impostors_dist = np.take_along_axis(dists, impostor_ind, axis=1)
+    sum_target_dists = np.sum(all_target_dist, axis=1)
+
+    for i in range(n_samples):
+        lossI = np.maximum(0, margin + all_target_dist[i, :, np.newaxis] - all_impostors_dist[i]).sum()
+        hinge[i] = sum_target_dists[i] + mu * lossI
+    return hinge.mean()
+
+
+def violating_hinge_loss(pred, target_ind, impostor_ind, margin=1.0):
+    dists = squareform(pdist(pred, 'sqeuclidean'))
+    all_target_dist = np.take_along_axis(dists, target_ind, axis=1)
+    all_impostors_dist = np.take_along_axis(dists, impostor_ind, axis=1)
+
+    violating = 0
+    for i in range(len(pred)):
+        violating += np.any(margin + all_target_dist[i, :, np.newaxis] - all_impostors_dist[i] > 0)
+
+    return violating
+
+
+def find_best_alpha(pred, wl_pred, target_ind, impostor_ind, loss_f=hinge_loss):
+    local_diff_step = 1e-6
+    alpha_interval = (-1, 2)
+    alpha_interval_width = max(alpha_interval) - min(alpha_interval)
+
+    while alpha_interval_width > 1e-8:
+        alpha = (max(alpha_interval) + min(alpha_interval)) / 2.0
+        aprox_gradient = (loss_f(pred + (alpha + local_diff_step) * wl_pred, target_ind, impostor_ind) -
+                          loss_f(pred + (alpha - local_diff_step) * wl_pred, target_ind, impostor_ind)) / \
+                         (2 * local_diff_step)
+        if aprox_gradient.mean() > 0:
+            # Move to the left
+            alpha_interval = (alpha_interval[0], alpha)
+        else:  # gradient < 0:
+            # Move to the right
+            alpha_interval = (alpha, alpha_interval[1])
+        alpha_interval_width = max(alpha_interval) - min(alpha_interval)
+
+    return alpha
+
+
+def gb_lmnn(X, y, k, L, verbose=False, depth=4, n_trees=200, lr=1e-3, no_potential_impo=50, subsample_rate=1.0,
             xval=np.array([]), yval=np.array([])) -> Ensemble:
     """
     Nonlinear metric learning using gradient boosting regression trees.
@@ -139,7 +206,6 @@ def gb_lmnn(X, y, k, L, tol=1e-3, verbose=True, depth=4, n_trees=200, lr=1e-3, n
     :param k: Number of nearest neighbours used to do the train step.
     :param L: (kxd) is an initial linear transformation which can be learned using LMNN.
     corresponds to a metric M=L'*L
-    :param tol: Tolerance for convergence
     :param verbose: Displays the training evolution
     :param depth: Tree depth
     :param n_trees: number of boosted trees
@@ -176,58 +242,49 @@ def gb_lmnn(X, y, k, L, tol=1e-3, verbose=True, depth=4, n_trees=200, lr=1e-3, n
     # initialize the lowest validation error
     lowest_val_err = np.inf
     best_ensemble = deepcopy(ensemble)
+    margin = 1.0
 
-    # initialize roll-back in case step size is too large
-    last_cost, last_pred, last_pred_val = np.inf, pred, pred_val
-
-    iter = 0
     # Perform main learning iterations
     while ensemble.n_wls < n_trees:
+        start = time()
         # Select potential imposters
-        if iter % 10 == 0:
-            impostor_ind = find_impostors(pred, labels, n_classes, no_potential_impo)
-            last_cost = np.inf  # allow objective to go up
-
-        hinge, grad = lmnn_obj_loss(pred, targets_ind, impostor_ind)
+        impostor_ind = find_impostors(pred, labels, n_classes, no_potential_impo)
+        hinge, grad = lmnn_obj_loss(pred, targets_ind, impostor_ind, margin)
         cost = np.sum(hinge)
-        if cost > last_cost:  # roll back in case things go wrong
-            cost = last_cost
-            pred = last_pred
-            pred_val = last_pred_val
-            # remove from ensemble
-            ensemble.weak_learners.pop(), ensemble.learning_rates.pop()
-            print('-->\t Learning rate too large ({}) ...'.format(lr))
-            lr /= 2.0
+
+        # Determine if we are going to use subsample
+        if subsample_rate == 1.0:
+            subsample_ind = slice(None)
         else:
-            # Otherwise increase learning rate a little
-            lr *= 1.01
+            subsample_ind = np.random.randint(0, N, int(N * subsample_rate))
 
         # Train the weak learner tree
         tree = DecisionTreeRegressor(max_depth=depth)
-        tree.fit(X, -grad)
+        tree.fit(X[subsample_ind], -grad[subsample_ind])
         wl_pred = tree.predict(X)
 
-        # Record previous values
-        last_pred, last_cost, last_pred_val = pred, cost, pred_val
+        alpha = lr  # * find_best_alpha(pred, wl_pred, targets_ind, impostor_ind)
 
         # Update predictions
-        pred = pred + lr * wl_pred
-        iter = ensemble.n_wls + 1
+        pred = pred + alpha * wl_pred
 
         # Add the tree and thew learning rate to the ensemble
         ensemble.weak_learners.append(tree)
-        ensemble.learning_rates.append(lr)
+        ensemble.learning_rates.append(alpha)
 
-        if iter % 10 == 0 and verbose:
-            # Print out progress
-            print("Iteration {}: loss is {:.6f}, violating inputs: {}, learning rate: {:.6f}".format(
-                iter, cost / N, np.sum(hinge > 0), lr))
+        # if iter % 10 == 0 and verbose:
+        # Print out progress
+        elapsed = time() - start
+        iter = ensemble.n_wls + 1
+        if verbose:
+            print("Iteration {}: loss is {:.6f}, violating inputs: {}, alpha: {:.6f}, in {:.2f}s".format(
+                iter, cost / N, violating_hinge_loss(pred, targets_ind, impostor_ind, margin), alpha, elapsed))
 
         # update best_ensemble of validation data
         if use_validation:
-            pred_val = pred_val + lr * tree.predict(xval)
+            pred_val = pred_val + alpha * tree.predict(xval)
 
-            if iter % 10 == 0 or iter == (n_trees - 1):
+            if iter % 5 == 0 or iter == (n_trees - 1):
                 tr_err, val_err = knn_error_score([], pred, y, pred_val, yval, k=1)
                 if verbose:
                     print("Iteration {}: Training error: {:.2f}%, Val. error: {:.2f}%".format(
@@ -236,6 +293,6 @@ def gb_lmnn(X, y, k, L, tol=1e-3, verbose=True, depth=4, n_trees=200, lr=1e-3, n
                 if val_err <= lowest_val_err:
                     lowest_val_err = val_err
                     best_ensemble = deepcopy(ensemble)
-                    if verbose and lowest_val_err >= 0.0:
+                    if verbose:
                         print('--->\t\tBest validation error! :D')
     return best_ensemble
