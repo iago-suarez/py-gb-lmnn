@@ -1,4 +1,10 @@
-# Iago Suarez implementation of Non-linear Metric Learning
+"""
+Pythonic implementation of the paper:
+    Kedem, D., Tyree, S., Sha, F., Lanckriet, G. R., & Weinberger, K. Q. (2012).
+    Non-linear metric learning. In NIPS (pp. 2573-2581).
+"""
+__author__ = "Iago Suarez"
+__email__ = "iago.suarez.canosa@alumnos.upm.es"
 from copy import deepcopy
 
 import numpy as np
@@ -10,6 +16,7 @@ from knn import knn_error_score
 
 
 class Ensemble:
+    """Ensemble class that predicts based on the weighted sum of weak learners."""
 
     @property
     def n_wls(self):
@@ -23,9 +30,6 @@ class Ensemble:
         self.weak_learners = weak_learners
         self.learning_rates = learning_rates
         self.L = L
-
-    def eval(self, X):
-        return self.transform(X)
 
     def transform(self, X):
         assert len(self.weak_learners) > 0, "Error: The model hasn't been trained"
@@ -126,31 +130,30 @@ def lmnn_obj_loss(pred, targets_ind, active_ind):  # X, T, I
     return hinge, grad
 
 
-def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no_potential_impo=50,
-            xval=np.array([]), yval=np.array([]), **kwargs) -> Ensemble:
+def gb_lmnn(X, y, k, L, tol=1e-3, verbose=True, depth=4, n_trees=200, lr=1e-3, no_potential_impo=50,
+            xval=np.array([]), yval=np.array([])) -> Ensemble:
     """
     Nonlinear metric learning using gradient boosting regression trees.
-    :param X: (dxn) is the input training data, 'labels' (1xn) the corresponing labels
-    :param Y: (kxd) is an initial linear transformation which can be learned using LMNN
-    :param K: Number of nearest neighbours
+    :param X: (NxD) is the input training data, 'labels' (1xn) the corresponding labels
+    :param y: (N) is an initial linear transformation which can be learned using LMNN
+    :param k: Number of nearest neighbours used to do the train step.
     :param L: (kxd) is an initial linear transformation which can be learned using LMNN.
     corresponds to a metric M=L'*L
     :param tol: Tolerance for convergence
-    :param verbose:
+    :param verbose: Displays the training evolution
     :param depth: Tree depth
-    :param kwargs:
-    :param ntrees: number of boosted trees
+    :param n_trees: number of boosted trees
     :param lr: learning rate for gradient boosting
-    :param no_potential_impo:
-    :param xval:
-    :param yval:
+    :param no_potential_impo: The number of potential impostors that will be used to pergorm the gradient computation.
+    :param xval: The validation samples
+    :param yval: The validation labels
     :return:
     """
-    assert len(X) == len(Y) and X.ndim == 2 and Y.ndim == 1
+    assert len(X) == len(y) and X.ndim == 2 and y.ndim == 1
     assert len(xval) == 0 or (xval.ndim == 2 and yval.ndim == 1 and len(xval) == len(yval))
     assert len(xval) == 0 or X.shape[1] == xval.shape[1]
 
-    un, labels = np.unique(Y), Y
+    un, labels = np.unique(y), y
     assert np.alltrue(un == np.arange(len(un))), "Error: labels should have format [1, 2, ..., C]"
     n_classes = len(un)
 
@@ -158,14 +161,14 @@ def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no
     pred = X @ L.T
     pred_val = xval @ L.T if use_validation else None
     if use_validation:
-        tr_err, val_err = knn_error_score([], X, Y, xval, yval, k=1)
-        print("--> Initial Training error: {:.2f}%, Val. error: {:.2f}%".format(100 * tr_err, 100 * val_err))
+        tr_err, val_err = knn_error_score([], X, y, xval, yval, k=1)
+        print("Initial Training error: {:.2f}%, Val. error: {:.2f}%".format(100 * tr_err, 100 * val_err))
 
     # Initialize some variables
     N, D = X.shape
 
     # find K target neighbors
-    targets_ind = find_target_neighbors(X, labels, K, n_classes)
+    targets_ind = find_target_neighbors(X, labels, k, n_classes)
 
     # initialize ensemble (cell array of trees)
     ensemble = Ensemble(L=L)
@@ -179,7 +182,7 @@ def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no
 
     iter = 0
     # Perform main learning iterations
-    while ensemble.n_wls < ntrees:
+    while ensemble.n_wls < n_trees:
         # Select potential imposters
         if iter % 10 == 0:
             impostor_ind = find_impostors(pred, labels, n_classes, no_potential_impo)
@@ -217,17 +220,18 @@ def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no
 
         if iter % 10 == 0 and verbose:
             # Print out progress
-            print("--> Iteration {}: loss is {:.6f}, violating inputs: {}, learning rate: {:.6f}".format(
+            print("Iteration {}: loss is {:.6f}, violating inputs: {}, learning rate: {:.6f}".format(
                 iter, cost / N, np.sum(hinge > 0), lr))
 
         # update best_ensemble of validation data
         if use_validation:
             pred_val = pred_val + lr * tree.predict(xval)
 
-            if iter % 10 == 0 or iter == (ntrees - 1):
-                tr_err, val_err = knn_error_score([], pred, Y, pred_val, yval, k=1)
-                print("--> Iteration {}: Training error: {:.2f}%, Val. error: {:.2f}%".format(
-                    iter, 100 * tr_err, 100 * val_err))
+            if iter % 10 == 0 or iter == (n_trees - 1):
+                tr_err, val_err = knn_error_score([], pred, y, pred_val, yval, k=1)
+                if verbose:
+                    print("Iteration {}: Training error: {:.2f}%, Val. error: {:.2f}%".format(
+                        iter, 100 * tr_err, 100 * val_err))
 
                 if val_err <= lowest_val_err:
                     lowest_val_err = val_err
