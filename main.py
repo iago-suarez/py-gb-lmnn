@@ -5,12 +5,10 @@ from metric_learn import LMNN
 from scipy.io import loadmat
 from sklearn.decomposition import PCA
 from sklearn.discriminant_analysis import LinearDiscriminantAnalysis
-from sklearn.neighbors import KNeighborsClassifier
-from sklearn.neighbors._ball_tree import BallTree
 from sklearn.pipeline import Pipeline
 
 from gb_lmnn import gb_lmnn
-from knn import LSKnn2, eval_knn
+from knn import knn_error_score
 
 
 def pca(X, whiten=False):
@@ -34,76 +32,6 @@ def pca(X, whiten=False):
     return evects, evals
 
 
-def knn_classify_balltree(L, xTr, lTr, xTe, lTe, KK, tree=None, treesize=15, train=True, **kwargs):
-    """
-
-    :param L: linear transformation
-    :param xTr: training vectors (each column is an instance)
-    :param lTr: training labels  (row vector!!)
-    :param xTe: test vectors
-    :param lTe: test labels
-    :param KK: number of nearest neighbors
-    :param kwargs: Other arguments
-    :return: Dictionary: {'tree': tree; 'teesize': 15; 'train':1; }
-        - tree',tree (precomputed,mtree)
-        - 'teesize',15 (max number of elements in leaf)
-        - 'train',1  (0 means no training error)
-    """
-    assert lTr.ndim == 1, lTe.ndim == 1
-    assert xTr.shape[0] == len(lTr)
-    assert xTe.shape[0] == len(lTe)
-
-    if len(L) != 0:
-        # L is the initial linear projection, for example PCa or LDA
-        xTr = xTr @ L.T
-        xTe = xTe @ L.T
-
-    if tree is None:
-        print('Building tree ...')
-        tree = BallTree(xTr, leaf_size=treesize, metric='euclidean')
-    else:
-        assert isinstance(tree, BallTree)
-
-    MM = np.append(lTr, lTe).min()
-    Kn = np.max(KK)
-    assert np.alltrue(KK > 0)
-
-    NTr, NTe = xTr.shape[0], xTe.shape[0]
-    if xTr.shape[1] != xTe.shape[1]:
-        raise ValueError('PROBLEM: Please make sure that training inputs and test inputs have the same dimensions!'
-                         'xTr.shape: {}, xTe.shape: {}'.format(xTr.shape, xTe.shape))
-
-    print("Evaluating...")
-    Eval = np.zeros((2, KK))
-    # Use the tree to compute the distance between the testing and training points
-    # iTe: indices of the testing elements in the training set
-    dists, iTe = tree.query(xTe, k=Kn, return_distance=True)
-    assert iTe.ndim == 2 and iTe.shape == (NTe, 1)
-    assert dists.ndim == 2 and dists.shape == (NTe, 1)
-
-    # Labels of the testing elements in the training set
-    lTe2 = LSKnn2(lTr[iTe], KK, MM)
-    # Compute the error for each k
-    Eval[1] = np.sum(lTe2 != np.repeat(lTe, KK, axis=0), axis=1) / NTe
-
-    Details = {}
-    if train:
-        # Use the tree to compute the distance between the training points
-        dists, iTr = tree.query(xTr, k=Kn + 1, return_distance=True)
-        iTr = iTr[:, 1:]
-        lTr2 = LSKnn2(lTr[iTr], KK, MM)
-        Eval[0, :] = np.sum(lTr2 != np.repeat(lTr, KK, axis=0), axis=1) / NTr
-
-        Details['lTr2'] = lTr2
-        Details['iTr'] = iTr
-    else:
-        Eval[0] = []
-
-    Details['lTe2'] = lTe2
-    Details['iTe'] = iTe
-    return Eval, Details
-
-
 # #####################################################################################3
 
 def main():
@@ -114,13 +42,11 @@ def main():
     # Load variables
     print("--> Loading data")
     _, _, _, xTe, xTr, xVa, yTr, yTe, yVa = loadmat('data/segment.mat').values()
+    # TODO xTe, xTr, xVa = xTe.T, xTr.T, xVa.T
     yTr, yTe, yVa = yTr.flatten().astype(int) - 1, yTe.flatten().astype(int) - 1, yVa.flatten().astype(int) - 1
-    err, _ = knn_classify_balltree([], xTr.T, yTr, xTe.T, yTe, 1)
 
     print("--> Training pca...")
     L0 = pca(xTr, whiten=True)[0].T
-    err, _ = knn_classify_balltree(L0[0:3], xTr.T, yTr, xTe.T, yTe, 1)
-    print('1-NN Error after PCA in 3d is : {}%'.format(100 * err[1]))
 
     print("--> Training pca-lda...")
     pca_lda = Pipeline([('pca', PCA(n_components=5, whiten=True)),
@@ -136,35 +62,37 @@ def main():
     print('Learning nonlinear metric with GB-LMNN ... ')
     L = pcalda_mat
     L = loadmat('data/lmnn2_L.mat')['L']  # Load the matlab matrix
-    embed = gb_lmnn(xTr, yTr, 3, L, ntrees=200, verbose=True, xval=xVa, yval=yVa)
-    # KNN classification error after metric learning using gbLMNN
-    err, Details = knn_classify_balltree([], embed.transform(xTr.T), yTr, embed.transform(xTe.T), yTe, 1)
-    print('GB-LMNN Training Error: {:.2f}%, Test (Error: {:.2f}%'.format(100 * err[0, 0], 100 * err[1, 0]))
+    embed = gb_lmnn(xTr.T, yTr, 3, L, ntrees=200, verbose=True, xval=xVa.T, yval=yVa)
 
     # ################################ k-NN evaluation ###################################
     print("\n--> Evaluation:")
     k = 1
-    te_err = eval_knn(xTr.T, yTr.flatten(), np.eye(len(xTr)), xTe.T, yTe.flatten(), k)
-    print('--> 1-NN Error for raw (high dimensional) input is : {:.2f}%'.format(100 * te_err))
+    raw_tr_err, raw_te_err = knn_error_score(L0[0:3], xTr.T, yTr, xTe.T, yTe, k)
+    print('--> 1-NN Error for raw (high dimensional) input is, Training: {:.2f}%, Testing {:.2f}%'
+          .format(100 * raw_tr_err, 100 * raw_te_err))
 
-    te_err = eval_knn(xTr.T, yTr.flatten(), L0[0:3].T, xTe.T, yTe.flatten(), k)
-    print('--> 1-NN Error for PCA is : {:.2f}%'.format(100 * te_err))
+    pca_tr_err, pca_te_err = knn_error_score(L0[0:3], xTr.T, yTr, xTe.T, yTe, k)
+    print('--> 1-NN Error for PCA in 3d is, Training: {:.2f}%, Testing {:.2f}%'
+          .format(100 * pca_tr_err, 100 * pca_te_err))
 
-    te_err = eval_knn(xTr.T, yTr.flatten(), pcalda_mat.T, xTe.T, yTe.flatten(), 1)
-    print('--> 1-NN Error for PCA-LDA input is : {:.2f}%'.format(100 * te_err))
+    lda_tr_err, lda_te_err = knn_error_score(pcalda_mat, xTr.T, yTr, xTe.T, yTe, k)
+    print('--> 1-NN Error for PCA-LDA input is, Training: {:.2f}%, Testing {:.2f}%'
+          .format(100 * lda_tr_err, 100 * lda_te_err))
 
-    te_err = eval_knn(xTr.T, yTr.flatten(), lmnn.components_[0:3].T, xTe.T, yTe.flatten(), k)
-    print('--> 1-NN Error for LMNN is : {:.2f}%'.format(100 * te_err))
+    lmnn_tr_err, lmnn_te_err = knn_error_score(lmnn.components_[0:3], xTr.T, yTr, xTe.T, yTe, k)
+    print('--> 1-NN Error for LMNN is, Training: {:.2f}%, Testing {:.2f}%'
+          .format(100 * lmnn_tr_err, 100 * lmnn_te_err))
 
-    te_err = eval_knn(embed.transform(xTr.T), yTr.flatten(), np.eye(3), embed.transform(xTe.T), yTe.flatten(), 1)
-    print('--> 1-NN Error for GB-LMNN input is : {:.2f}%'.format(100 * te_err))
+    gb_tr_err, gb_te_err = knn_error_score([], embed.transform(xTr.T), yTr, embed.transform(xTe.T), yTe, 1)
+    print('--> 1-NN Error for GB-LMNN input is, Training: {:.2f}%, Testing {:.2f}%'
+          .format(100 * gb_tr_err, 100 * gb_te_err))
 
     # ################################ 3-D Plot ###################################
     print("\n--> Plotting figures")
 
-    fig = plt.figure(figsize=plt.figaspect(1))
+    fig = plt.figure(figsize=(12, 8))
     ax1 = fig.add_subplot(2, 2, 1, projection='3d')
-    ax1.set_title("PCA Training Error: {:.2f}, Testing Error: {:.2f}".format(100 * err[0, 0], 100 * err[1, 0]))
+    ax1.set_title("PCA Train Error: {:.2f}, Test Error: {:.2f}".format(100 * pca_tr_err, 100 * pca_te_err))
     pts_to_plt = L0[0:3] @ xTr
 
     for l in np.unique(yTr):
@@ -173,7 +101,7 @@ def main():
     plt.legend()
 
     ax2 = fig.add_subplot(2, 2, 2, projection='3d')
-    ax2.set_title("PCA-LDA")
+    ax2.set_title("PCA-LDA Train Error: {:.2f}, Test Error: {:.2f}".format(100 * lda_tr_err, 100 * lda_te_err))
     pts_to_plt = pcalda_mat @ xTr
 
     for l in np.unique(yTr):
@@ -182,7 +110,7 @@ def main():
     plt.legend()
 
     ax3 = fig.add_subplot(2, 2, 3, projection='3d')
-    ax3.set_title("LMNN")
+    ax3.set_title("LMNN Train Error: {:.2f}, Test Error: {:.2f}".format(100 * lmnn_tr_err, 100 * lmnn_te_err))
     pts_to_plt = lmnn.transform(xTr.T).T
     for l in np.unique(yTr):
         mask = np.squeeze(yTr == l)
@@ -190,7 +118,7 @@ def main():
     plt.legend()
 
     ax4 = fig.add_subplot(2, 2, 4, projection='3d')
-    ax4.set_title("GB-LMNN")
+    ax4.set_title("GB-LMNN Train Error: {:.2f}, Test Error: {:.2f}".format(100 * gb_tr_err, 100 * gb_te_err))
     pts_to_plt = embed.transform(xTr.T).T
     for l in np.unique(yTr):
         mask = np.squeeze(yTr == l)

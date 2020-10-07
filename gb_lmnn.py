@@ -6,7 +6,7 @@ from scipy.spatial.distance import cdist
 from sklearn.neighbors._ball_tree import BallTree
 from sklearn.tree import DecisionTreeRegressor
 
-from knn import eval_knn
+from knn import knn_error_score
 
 
 class Ensemble:
@@ -47,7 +47,6 @@ class Ensemble:
 
 
 def find_target_neighbors(X, labels, K, n_classes):
-    X = X.T
     N, D = X.shape
     targets_ind = np.zeros((N, K), dtype=int)
     for i in range(n_classes):
@@ -62,7 +61,6 @@ def find_target_neighbors(X, labels, K, n_classes):
 
 
 def find_impostors(pred, labels, n_classes, no_potential_impo):
-    pred = pred.T
     N = len(pred)
     active = np.zeros((N, no_potential_impo), dtype=int)
     for i in range(n_classes):
@@ -75,29 +73,28 @@ def find_impostors(pred, labels, n_classes, no_potential_impo):
         hardest_examples = kdt.query(pi, k=no_potential_impo, return_distance=False)
         active[ii] = jj[hardest_examples]
 
-    return active.T
+    return active
 
 
-def compute_loss(X, T, I, kt, i, grad):
+def compute_loss(X, T, I, i, grad):
     # TODO This uses a fixed margin of 1, this should be parametrized depending of the problem!
     # compute distances to target neighbors
-    dt = cdist(X[i, np.newaxis], X[T], 'sqeuclidean').flatten()
-    lossT = np.sum(dt)
+    targets_distance = cdist(X[i, np.newaxis], X[T], 'sqeuclidean').flatten()
+    lossT = np.sum(targets_distance)
     # compute the influence of the target neighbors in the gradient
     grad[i] += np.sum(X[np.newaxis, i] - X[T], axis=0)
     grad[T] -= X[i] - X[T]
 
     dists = cdist(X[i, np.newaxis], X[I], 'sqeuclidean').flatten()
     # Hinge loss
-    lossI = np.maximum(0, 1 + dt[:, np.newaxis] - dists).sum()
+    lossI = np.maximum(0, 1 + targets_distance[:, np.newaxis] - dists).sum()
     #  compute distances to impostors
-    for k, dis in enumerate(dists):  # For each impostor
-        for j in range(kt):  # For each target neighbor
-            # For each target neighbor
-            if dt[j] > dis - 1:
+    for k, k_distance in enumerate(dists):  # For each impostor
+        for j, j_distance in zip(T, targets_distance):  # For each target neighbor
+            if j_distance > k_distance - 1:
                 # TODO Understand: Update gradient
-                grad[i] -= X[T[j]] - X[I[k]]
-                grad[T[j]] -= X[i] - X[T[j]]
+                grad[i] -= X[j] - X[I[k]]
+                grad[j] -= X[i] - X[j]
                 grad[I[k]] += X[i] - X[I[k]]
 
     return 0.5 * (lossT + lossI)
@@ -119,15 +116,14 @@ def lmnn_obj_loss(pred, targets_ind, active_ind):  # X, T, I
     :return: The evaluation of the loss and its gradient
     """
     assert pred.ndim == 2 and targets_ind.ndim == 2 and active_ind.ndim == 2
-    assert pred.shape[1] == targets_ind.shape[1] == active_ind.shape[1]
-    pred = pred.T
+    assert pred.shape[0] == targets_ind.shape[0] == active_ind.shape[0]
+
     n_samples, n_dims = pred.shape
     hinge, grad = np.zeros(n_samples), np.zeros(pred.shape)
-    kt = targets_ind.shape[0]  # number of target neighbors
     for i in range(n_samples):
-        hinge[i] = compute_loss(pred, targets_ind[:, i], active_ind[:, i], kt, i, grad)
+        hinge[i] = compute_loss(pred, targets_ind[i], active_ind[i], i, grad)
 
-    return hinge, grad.T
+    return hinge, grad
 
 
 def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no_potential_impo=50,
@@ -150,50 +146,46 @@ def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no
     :param yval:
     :return:
     """
+    assert len(X) == len(Y) and X.ndim == 2 and Y.ndim == 1
+    assert len(xval) == 0 or (xval.ndim == 2 and yval.ndim == 1 and len(xval) == len(yval))
+    assert len(xval) == 0 or X.shape[1] == xval.shape[1]
+
     un, labels = np.unique(Y), Y
-    # Check that the labels have the correct format [0, 1, ..., L]
-    assert np.alltrue(un == np.arange(len(un)))
+    assert np.alltrue(un == np.arange(len(un))), "Error: labels should have format [1, 2, ..., C]"
     n_classes = len(un)
 
     use_validation = xval is not None
-    pred = L @ X
-    pred_val = L @ xval if use_validation else None
-    eye = np.eye(pred.shape[0])
+    pred = X @ L.T
+    pred_val = xval @ L.T if use_validation else None
     if use_validation:
-        valerr = eval_knn(pred.T, Y, eye, pred_val.T, yval.flatten(), k=1)
-        print("--> Initial validation error: {:.2f}%".format(100 * valerr))
+        tr_err, val_err = knn_error_score([], X, Y, xval, yval, k=1)
+        print("--> Initial Training error: {:.2f}%, Val. error: {:.2f}%".format(100 * tr_err, 100 * val_err))
 
     # Initialize some variables
-    D, N = X.shape
-    assert (len(labels) == N)
+    N, D = X.shape
 
     # find K target neighbors
     targets_ind = find_target_neighbors(X, labels, K, n_classes)
-
-    # sort the training input feature-wise (column-wise)
-    N = X.shape[1]
 
     # initialize ensemble (cell array of trees)
     ensemble = Ensemble(L=L)
 
     # initialize the lowest validation error
-    lowestval = np.inf
-    best_ensemble = None if use_validation else ensemble
+    lowest_val_err = np.inf
+    best_ensemble = deepcopy(ensemble)
 
-    # initialize roll-back in case stepsize is too large
-    last_cost = np.inf
-    last_pred = pred
-    last_pred_val = pred_val
+    # initialize roll-back in case step size is too large
+    last_cost, last_pred, last_pred_val = np.inf, pred, pred_val
 
     iter = 0
     # Perform main learning iterations
     while ensemble.n_wls < ntrees:
         # Select potential imposters
         if iter % 10 == 0:
-            active = find_impostors(pred, labels, n_classes, no_potential_impo)
+            impostor_ind = find_impostors(pred, labels, n_classes, no_potential_impo)
             last_cost = np.inf  # allow objective to go up
 
-        hinge, grad = lmnn_obj_loss(pred, targets_ind.T, active)
+        hinge, grad = lmnn_obj_loss(pred, targets_ind, impostor_ind)
         cost = np.sum(hinge)
         if cost > last_cost:  # roll back in case things go wrong
             cost = last_cost
@@ -209,36 +201,37 @@ def gb_lmnn(X, Y, K, L, tol=1e-3, verbose=True, depth=4, ntrees=200, lr=1e-3, no
 
         # Train the weak learner tree
         tree = DecisionTreeRegressor(max_depth=depth)
-        tree.fit(X.T, -grad.T)
-        wl_pred = tree.predict(X.T)
+        tree.fit(X, -grad)
+        wl_pred = tree.predict(X)
 
         # Record previous values
         last_pred, last_cost, last_pred_val = pred, cost, pred_val
 
         # Update predictions
-        pred = pred + lr * wl_pred.T
+        pred = pred + lr * wl_pred
         iter = ensemble.n_wls + 1
 
         # Add the tree and thew learning rate to the ensemble
         ensemble.weak_learners.append(tree)
         ensemble.learning_rates.append(lr)
 
-        # Print out progress
-        no_slack = np.sum(hinge > 0)
         if iter % 10 == 0 and verbose:
-            print("--> Iteration {}: loss is {}, violating inputs: {}, learning rate: {:.6f}".format(
-                iter, cost / N, no_slack, lr))
+            # Print out progress
+            print("--> Iteration {}: loss is {:.6f}, violating inputs: {}, learning rate: {:.6f}".format(
+                iter, cost / N, np.sum(hinge > 0), lr))
 
         # update best_ensemble of validation data
         if use_validation:
-            pred_val = pred_val + lr * tree.predict(xval.T).T
+            pred_val = pred_val + lr * tree.predict(xval)
 
             if iter % 10 == 0 or iter == (ntrees - 1):
-                eye = np.eye(pred.shape[0])
-                valerr = eval_knn(pred.T, Y, eye, pred_val.T, yval.flatten(), k=1)
-                if valerr <= lowestval:
-                    lowestval = valerr
+                tr_err, val_err = knn_error_score([], pred, Y, pred_val, yval, k=1)
+                print("--> Iteration {}: Training error: {:.2f}%, Val. error: {:.2f}%".format(
+                    iter, 100 * tr_err, 100 * val_err))
+
+                if val_err <= lowest_val_err:
+                    lowest_val_err = val_err
                     best_ensemble = deepcopy(ensemble)
-                    if verbose and lowestval >= 0.0:
-                        print('----> Best validation error: {:.2f}%'.format(lowestval * 100.0))
+                    if verbose and lowest_val_err >= 0.0:
+                        print('--->\t\tBest validation error! :D')
     return best_ensemble
